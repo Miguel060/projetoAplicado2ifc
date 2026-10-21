@@ -8,9 +8,28 @@ repository variables, including `INGEST_CONTACT`), `06-ci-cd/02-deploy-site.md`
 (the site that reads the data).
 
 This is the "backend" of the project in production: a scheduled job, not a
-server. It runs the Go ETL on a GitHub runner, then publishes an immutable,
-versioned snapshot to `s3://<bucket>/data/<version>/` and switches
-`data/latest.json` to it.
+server. It runs the backend test suite, then the Go ETL on a GitHub runner,
+then publishes an immutable, versioned snapshot to
+`s3://<bucket>/data/<version>/` and switches `data/latest.json` to it.
+
+## Why GitHub Actions and not AWS Lambda
+
+Decision **D16** (`00-overview/02-decisions.md`). In short — cost is not the
+reason, both are nearly free:
+
+- the ETL runs **after `go test`, from the same checkout**, and a push that
+  touches `backend/` re-runs it with the new code: one release path, not two;
+- every group member sees the logs and history, receives failure e-mails and
+  has a "Run workflow" button **without AWS access**;
+- nothing new to build and secure in AWS (no function, schedule, log group or
+  alerting) — only the existing deploy role with short-lived OIDC credentials;
+- generous limits (6 h per job, ~14 GB disk) versus Lambda's 15 min, and
+  `make ingest` locally is the same command.
+
+Accepted costs: the 60-day pause of scheduled workflows (below), approximate
+cron start times, and a skipped refresh if GitHub is down (the site keeps
+serving the last snapshot). Revisit if the data must refresh hourly or
+independently of GitHub.
 
 ## Triggers
 
@@ -61,10 +80,20 @@ after 5 leaves the new snapshot live and complete.
 | `data/<version>/dataset.sqlite` | `application/vnd.sqlite3` + `Content-Disposition: attachment` | `public, max-age=31536000, immutable` |
 | `data/latest.json` | `application/json; charset=utf-8` | `public, max-age=60` |
 
+## Tests before data (decision D15)
+
+The `ingest` job runs `go vet` and the **same `go test` command as CI** —
+race detector, unit tests, the fake-upstream pipeline integration test, the
+golden snapshot comparison and the **85 % coverage gate** — **before**
+`go run ./cmd/ingest`. A scheduled run therefore never publishes data
+produced by code whose tests fail, even if something reached `main` by an
+admin bypass. The tests touch no network, so a failure here is always a code
+problem, never a government site being down.
+
 ## Two jobs, on purpose
 
-`ingest` parses third-party files and runs **without** `id-token: write`, so
-nothing in the ETL can mint AWS credentials. `publish` has the token
+`ingest` tests and runs the ETL, parses third-party files, and runs
+**without** `id-token: write`, so nothing in the ETL can mint AWS credentials. `publish` has the token
 permission but runs **no repository code** — only the AWS CLI on the
 artifact the first job produced.
 
@@ -105,9 +134,9 @@ defaults:
 
 jobs:
   ingest:
-    name: Build the data snapshot
+    name: Test, then build the data snapshot
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     outputs:
       version: ${{ steps.version.outputs.version }}
     defaults:
@@ -129,6 +158,16 @@ jobs:
 
       - name: go vet
         run: go vet ./...
+
+      # Same command and gate as ci.yml (job "Backend (Go)"): no snapshot is
+      # built by code whose tests fail. Offline: the tests use a fake upstream.
+      - name: go test (race detector, coverage of ./internal/...)
+        run: go test -race -covermode=atomic -coverpkg=./internal/... -coverprofile=coverage.out ./...
+
+      - name: Coverage gate (>= 85%)
+        run: |
+          go tool cover -func=coverage.out | tail -n 1 | tee -a "$GITHUB_STEP_SUMMARY"
+          go tool cover -func=coverage.out | awk '/^total:/ { sub("%","",$3); if ($3+0 < 85) { print "coverage " $3 "% < 85%"; exit 1 } else print "coverage " $3 "%" }'
 
       # Downloads every source fresh (the runner starts with an empty .cache),
       # validates, and exits non-zero instead of producing a broken snapshot.
@@ -313,8 +352,9 @@ jobs:
 2. On a branch, add `.github/workflows/refresh-data.yml` with the content above.
 3. Open a PR → review → merge. Because the file is under the `paths` filter,
    the merge itself triggers the first refresh.
-4. Watch **Actions → Refresh data**: `Build the data snapshot` (≈5–10 min,
-   mostly downloads) → `Publish the snapshot`.
+4. Watch **Actions → Refresh data**: `Test, then build the data snapshot`
+   (tests ≈1–2 min, then the ETL ≈5–10 min, mostly downloads) →
+   `Publish the snapshot`.
 5. Open `SITE_URL/candidatos`: the search page lists the candidates and the footer shows
    the new "Dados atualizados em …" date.
 6. Check the next Monday that the scheduled run happened (the Actions tab
@@ -339,6 +379,7 @@ are still in the bucket.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| `go test` or the coverage gate fails before the ETL | Code on `main` with failing tests (should be impossible with branch protection) | Fix on a branch → PR → merge; the push re-runs this workflow. The live snapshot is untouched. |
 | `INGEST_CONTACT must be set in CI` | Variable missing | Repository admin creates `INGEST_CONTACT` (05.02). |
 | ETL fails in validation comparing with the live snapshot | A source changed shape or returned partial data — or the change is intentional | Read the log first. If intentional, run manually with **skip_previous_check**. |
 | ETL fails downloading | Government site down or slow | Re-run later; the live snapshot is untouched. |
@@ -349,6 +390,7 @@ are still in the bucket.
 ## Done when
 
 - [ ] A merge touching `backend/` publishes a new snapshot end to end.
+- [ ] The run log shows `go test` and `coverage ≥ 85%` **before** the `Run the ETL` step.
 - [ ] `curl -s "$SITE_URL/data/latest.json"` shows the new `version`.
 - [ ] `aws s3 ls "s3://<bucket>/data/" --profile personal` lists at most 5 version prefixes plus `latest.json`.
 - [ ] The first scheduled Monday run is green.

@@ -6,7 +6,8 @@ CGU – Portal da Transparência), with the source of every value.
 
 > This folder is **versioned and public** in the repository. It must never
 > contain personal data, e-mail addresses, credentials or anyone's local
-> machine setup. Scope: **production code only** — no automated test suites.
+> machine setup. Scope: production code **and its tests** — every step ships
+> its own tests, and nothing deploys unless they pass (D15).
 
 ## At a glance
 
@@ -19,6 +20,8 @@ CGU – Portal da Transparência), with the source of every value.
 | Where does it run? | AWS (personal account `436812234154`, `us-east-1`): S3 + CloudFront. Pipeline on GitHub Actions with OIDC. | `05-infrastructure/`, `06-ci-cd/` |
 | How much does it cost? | ≈ US$0.01–0.10 / month | `00-overview/05-aws-cost.md` |
 | Design system? | **shadcn/ui** (Radix + Tailwind CSS 4), nothing else. | D8 |
+| How is it tested? | Go unit + whole-pipeline integration tests; Vitest + Testing Library; Playwright e2e (Chromium + WebKit) with axe; CDK assertion tests. **85 % coverage gate** on backend and frontend. Every frontend step is also checked interactively with Claude in Chrome. All of it runs before every deploy. | D15, `01-foundation/05-testing-strategy.md` |
+| Why GitHub Actions and not Lambda for the ingestion? | Same pipeline as the code (tests then ETL), visible to every member without AWS access, no extra infra to secure, no 15-minute limit. | D16 |
 | How is it deployed? | Same design as the group's proven setup: **every push to `main`** runs CI and, if green, publishes the site. Data refreshes weekly, on demand, and when `backend/` changes. Infra is deployed manually. | D13, `06-ci-cd/` |
 | In what order do we build it? | **`STEPS.md`** — 25 numbered steps, one PR each: "do step 1", "do step 2"… (calendar/ownership view: `07-delivery/01-implementation-order.md`) | `STEPS.md` |
 
@@ -30,7 +33,7 @@ plan/
 ├── STEPS.md                                    ★ the execution order: "do step N"
 ├── 00-overview/                                WHAT and WHY
 │   ├── 01-project.md                           scope, MVP goals, selection rule, out of scope, schedule
-│   ├── 02-decisions.md                         decision log D1–D13 (incl. "backend or not", design system, LGPD, deploy)
+│   ├── 02-decisions.md                         decision log D1–D16 (backend or not, design system, LGPD, deploy, landing, tests, Actions vs Lambda)
 │   ├── 03-architecture.md                      diagram, components, data flow, security model
 │   ├── 04-tech-stack.md                        languages, libraries, pinned versions, rejected options
 │   └── 05-aws-cost.md                          monthly estimate and guard rails
@@ -38,7 +41,8 @@ plan/
 │   ├── 01-prerequisites.md                     tools, GitHub roles, AWS profile safety
 │   ├── 02-repository-layout.md                 monorepo tree, .gitignore, Makefile, conventions
 │   ├── 03-data-model.md                        SQLite schema, source ids, result codes, slug rule
-│   └── 04-json-contract.md                     backend → frontend JSON files and TypeScript types
+│   ├── 04-json-contract.md                     backend → frontend JSON files and TypeScript types
+│   └── 05-testing-strategy.md                  test gates, coverage, synthetic fixtures, golden snapshot, browser checks
 ├── 02-data-sources/                            WHERE the data comes from
 │   ├── 01-tse.md                               candidates, votes, assets, finance, social, photos
 │   ├── 02-camara.md                            deputies, bills, roll-call votes, CEAP
@@ -52,7 +56,8 @@ plan/
 │   ├── 05-load-camara.md                       Câmara loaders and CPF matching
 │   ├── 06-load-amendments.md                   CGU amendments and author matching
 │   ├── 07-export-json.md                       JSON export, photos, dataset
-│   └── 08-validate-and-publish.md              validation gates and S3 publish
+│   ├── 08-validate-and-publish.md              validation gates and S3 publish
+│   └── 09-integration-tests.md                 fake upstream, synthetic fixtures, golden snapshot
 ├── 04-frontend/                                HOW the React app is built (step by step)
 │   ├── 01-project-setup.md                     Vite, Tailwind, shadcn/ui, tokens, dev data server
 │   ├── 02-data-access.md                       types, fetchers, loaders, formatters
@@ -60,7 +65,8 @@ plan/
 │   ├── 04-search-page.md                       "/candidatos" — search, filters, sorting, cards
 │   ├── 05-profile-page.md                      "/candidatos/:slug" — profile sections and source notes
 │   ├── 06-about-page.md                        "/sobre" — methodology, sources, dataset download
-│   └── 07-accessibility-responsiveness-neutrality.md
+│   ├── 07-accessibility-responsiveness-neutrality.md
+│   └── 08-testing.md                           Vitest, Playwright + axe, Claude in Chrome procedure
 ├── 05-infrastructure/                          AWS
 │   ├── 01-cdk-stack.md                         S3, CloudFront, Function, headers, deploy role
 │   └── 02-github-oidc-and-variables.md         OIDC trust, repository variables, branch protection

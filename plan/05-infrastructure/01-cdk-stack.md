@@ -18,7 +18,8 @@ IAM role ProjetoAplicado2Deploy  ◄── GitHub OIDC (imported, account-level 
 
 Infrastructure is deployed **manually** by the AWS account owner (the same
 model as the PacketLaboratory project in this account). CI never changes infrastructure; it only runs
-`cdk synth` as a check. The deploy role can publish files and invalidate the
+the assertion tests (Step 6b) and `cdk synth` as checks — a stack change that
+breaks a security invariant fails CI before anyone can deploy it. The deploy role can publish files and invalidate the
 cache — nothing more.
 
 ---
@@ -28,7 +29,7 @@ cache — nothing more.
 From the repository root:
 
 ```bash
-mkdir -p infra/bin infra/lib
+mkdir -p infra/bin infra/lib infra/test
 ```
 
 `infra/package.json` — exact pins, no `^`:
@@ -48,7 +49,8 @@ mkdir -p infra/bin infra/lib
     "diff": "cdk diff",
     "deploy": "cdk deploy",
     "typecheck": "tsc --noEmit",
-    "lint": "biome check ."
+    "lint": "biome check .",
+    "test": "vitest run --coverage"
   },
   "dependencies": {
     "aws-cdk-lib": "2.269.0",
@@ -57,8 +59,10 @@ mkdir -p infra/bin infra/lib
   "devDependencies": {
     "@biomejs/biome": "2.5.12",
     "@types/node": "24.13.4",
+    "@vitest/coverage-v8": "5.0.5",
     "aws-cdk": "2.1141.0",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
   }
 }
 ```
@@ -104,7 +108,7 @@ explicit `.ts` import specifiers — both enforced below.
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["bin", "lib"]
+  "include": ["bin", "lib", "test", "vitest.config.ts"]
 }
 ```
 
@@ -125,12 +129,17 @@ explicit `.ts` import specifiers — both enforced below.
 
 `cdk.out/` is already in the root `.gitignore`.
 
-## Step 4 — `bin/app.ts` (the account is pinned here)
+## Step 4 — `lib/config.ts` and `bin/app.ts` (the account is pinned here)
+
+The stack's configuration lives in `lib/config.ts`, separate from
+`bin/app.ts`, so the assertion tests (Step 6b) build the stack from **the very
+same values** that get deployed. `bin/app.ts` cannot be imported by a test: it
+creates the CDK `App` as a side effect.
+
+`infra/lib/config.ts`:
 
 ```ts
-#!/usr/bin/env node
-import { App, Tags } from "aws-cdk-lib";
-import { SiteStack } from "../lib/site-stack.ts";
+import type { SiteStackProps } from "./site-stack.ts";
 
 /**
  * Pinned on purpose. A developer machine often has several AWS profiles. CDK
@@ -138,14 +147,14 @@ import { SiteStack } from "../lib/site-stack.ts";
  * account, which turns a wrong profile into an error message instead of
  * resources in some other account.
  */
-const ACCOUNT = "436812234154";
+export const ACCOUNT = "436812234154";
 
 /** CloudFront certificates (for a future custom domain) must live here. */
-const REGION = "us-east-1";
+export const REGION = "us-east-1";
 
-const app = new App();
+export const STACK_NAME = "ProjetoAplicado2";
 
-new SiteStack(app, "ProjetoAplicado2", {
+export const siteStackProps: SiteStackProps = {
   env: { account: ACCOUNT, region: REGION },
   description: "Projeto Aplicado II (IFC): non-partisan candidate panel for Videira/SC. S3 + CloudFront, no servers.",
   repository: "Miguel060/projetoAplicado2ifc",
@@ -157,7 +166,20 @@ new SiteStack(app, "ProjetoAplicado2", {
   // Account-level provider created by the PacketLaboratory stack. IMPORTED, never created
   // here: an account can hold only one provider per URL. See 05-infrastructure/02.
   githubOidcProviderArn: `arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`,
-});
+};
+```
+
+`infra/bin/app.ts`:
+
+```ts
+#!/usr/bin/env node
+import { App, Tags } from "aws-cdk-lib";
+import { STACK_NAME, siteStackProps } from "../lib/config.ts";
+import { SiteStack } from "../lib/site-stack.ts";
+
+const app = new App();
+
+new SiteStack(app, STACK_NAME, siteStackProps);
 
 // Lets Cost Explorer separate this project from PacketLaboratory once the tag is
 // activated in Billing → Cost allocation tags.
@@ -207,7 +229,7 @@ touched, so `/candidatos?q=maria&cargo=federal` keeps its filters.
 ## Step 6 — `lib/site-stack.ts`
 
 ```ts
-import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   CfnOutput,
   Duration,
@@ -294,7 +316,7 @@ export class SiteStack extends Stack {
     const spaRewrite = new cloudfront.Function(this, "SpaRewrite", {
       runtime: cloudfront.FunctionRuntime.JS_2_0,
       code: cloudfront.FunctionCode.fromFile({
-        filePath: join(import.meta.dirname, "spa-rewrite.js"),
+        filePath: fileURLToPath(new URL("spa-rewrite.js", import.meta.url)),
       }),
       comment: "Serve /index.html for extension-less paths (SPA routes)",
     });
@@ -421,12 +443,479 @@ Design notes that are easy to undo by accident:
 | `RETAIN` on the bucket | `cdk destroy` keeps the content. Delete the bucket by hand if the project is ever retired. |
 | Imported OIDC provider | Creating a second provider for the same URL fails (`EntityAlreadyExists`). |
 
+## Step 6b — Assertion tests (`infra/test/`)
+
+Decision D15 and `01-foundation/05-testing-strategy.md` § Infrastructure:
+the security invariants of this stack are **pinned by tests**. They run in the
+CI job `Infrastructure (CDK)` (and therefore before every site deploy, which
+reuses CI). Coverage is **reported, not gated**: the code is declarative and
+the assertions are what protect it.
+
+| Invariant | Test |
+|---|---|
+| Bucket: Block Public Access fully on, SSL enforced, `RETAIN`, no lifecycle rule, no website hosting | `site-stack.test.ts` → "bucket" |
+| Bucket policy allows reads only to this distribution | `site-stack.test.ts` → "bucket" |
+| Distribution: Origin Access Control (no legacy OAI), redirect to HTTPS, optimized cache policy, no error-page fallback, all edge locations, HTTP/2+3 | `site-stack.test.ts` → "distribution" |
+| Viewer-request function attached, and its deployed code **is** `lib/spa-rewrite.js` | `site-stack.test.ts` → "distribution" |
+| Response headers policy with the **exact** CSP string and the other security headers | `site-stack.test.ts` → "response headers" |
+| Deploy role trust: `aud = sts.amazonaws.com` and **exactly** the two subjects, no wildcard, no extra condition | `site-stack.test.ts` → "deploy role" |
+| Deploy role permissions: **exactly** the six documented actions, on this bucket / this distribution only | `site-stack.test.ts` → "deploy role" |
+| OIDC provider imported: no provider resource (and no Lambda) in the template | `site-stack.test.ts` → "stack placement" |
+| Stack pinned to `436812234154` / `us-east-1` | `site-stack.test.ts` → "stack placement" |
+| CloudFront Function rewrite table | `spa-rewrite.test.ts` |
+
+Expected values (account, subjects, CSP, actions) are written out
+**literally** in the tests. Importing them from the code under test would make
+every assertion pass by construction.
+
+### `infra/vitest.config.ts`
+
+```ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["test/**/*.test.ts"],
+    environment: "node",
+    // Synthesising the stack takes a few seconds on a cold CI runner.
+    testTimeout: 30_000,
+    coverage: {
+      provider: "v8",
+      // bin/app.ts is a side-effect entry point and is never imported by tests.
+      include: ["lib/**/*.ts"],
+      reporter: ["text", "text-summary"],
+      // No thresholds: reported only (decision D15). lib/spa-rewrite.js runs
+      // inside node:vm in its test, which v8 coverage does not instrument.
+    },
+  },
+});
+```
+
+### `infra/test/site-stack.test.ts`
+
+```ts
+import { readFileSync } from "node:fs";
+import { App } from "aws-cdk-lib";
+import { Match, Template } from "aws-cdk-lib/assertions";
+import { beforeAll, describe, expect, it } from "vitest";
+import { STACK_NAME, siteStackProps } from "../lib/config.ts";
+import { SiteStack } from "../lib/site-stack.ts";
+
+// ---- Expected values, written out literally on purpose -------------------------------
+
+const ACCOUNT = "436812234154";
+const REGION = "us-east-1";
+const OIDC_PROVIDER_ARN = `arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`;
+const SUBJECTS = [
+  "repo:Miguel060/projetoAplicado2ifc:ref:refs/heads/main",
+  "repo:Miguel060@77062840/projetoAplicado2ifc@1366189075:ref:refs/heads/main",
+];
+const CSP =
+  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
+  "font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; " +
+  "frame-ancestors 'none'; upgrade-insecure-requests";
+/** AWS managed cache policy "CachingOptimized". */
+const CACHING_OPTIMIZED_ID = "658327ea-f89d-4fab-a63d-7e88639e58f6";
+const DEPLOY_ACTIONS = [
+  "s3:ListBucket",
+  "s3:GetObject",
+  "s3:PutObject",
+  "s3:DeleteObject",
+  "cloudfront:CreateInvalidation",
+  "cloudfront:GetInvalidation",
+];
+
+// ---- Helpers ----------------------------------------------------------------------------
+
+type CfnResource = ReturnType<Template["findResources"]>[string];
+
+interface PolicyStatement {
+  Effect: string;
+  Action: string | string[];
+  Resource?: unknown;
+  Principal?: unknown;
+  Condition?: unknown;
+}
+
+/** The feature flags the CDK CLI applies from cdk.json, so the tested template equals the deployed one. */
+function cdkJsonContext(): Record<string, unknown> {
+  const raw = readFileSync(new URL("../cdk.json", import.meta.url), "utf8");
+  return (JSON.parse(raw) as { context: Record<string, unknown> }).context;
+}
+
+let stack: SiteStack;
+let template: Template;
+
+function onlyResource(type: string): { key: string; resource: CfnResource } {
+  const entries = Object.entries(template.findResources(type));
+  expect(entries, `exactly one ${type}`).toHaveLength(1);
+  const [entry] = entries;
+  if (entry === undefined) throw new Error(`no ${type} in the template`);
+  return { key: entry[0], resource: entry[1] };
+}
+
+function statementsOf(resource: CfnResource): PolicyStatement[] {
+  return resource["Properties"]["PolicyDocument"]["Statement"] as PolicyStatement[];
+}
+
+beforeAll(() => {
+  const app = new App({ context: cdkJsonContext() });
+  stack = new SiteStack(app, STACK_NAME, siteStackProps);
+  template = Template.fromStack(stack);
+});
+
+// ---- Tests ------------------------------------------------------------------------------
+
+describe("stack placement", () => {
+  it("is pinned to the project account and region", () => {
+    expect(siteStackProps.env).toEqual({ account: ACCOUNT, region: REGION });
+    expect(stack.account).toBe(ACCOUNT);
+    expect(stack.region).toBe(REGION);
+    expect(STACK_NAME).toBe("ProjetoAplicado2");
+  });
+
+  it("imports the GitHub OIDC provider instead of creating one, and creates no compute", () => {
+    template.resourceCountIs("Custom::AWSCDKOpenIdConnectProvider", 0);
+    template.resourceCountIs("AWS::IAM::OIDCProvider", 0);
+    template.resourceCountIs("AWS::Lambda::Function", 0);
+  });
+
+  it("exports the four outputs the repository variables are copied from", () => {
+    for (const name of ["BucketName", "DistributionId", "SiteUrl", "DeployRoleArn"]) {
+      template.hasOutput(name, {});
+    }
+  });
+});
+
+describe("bucket", () => {
+  it("is private, retained, and has no lifecycle rule or website hosting", () => {
+    onlyResource("AWS::S3::Bucket");
+    template.hasResource("AWS::S3::Bucket", {
+      DeletionPolicy: "Retain",
+      UpdateReplacePolicy: "Retain",
+      Properties: {
+        PublicAccessBlockConfiguration: {
+          BlockPublicAcls: true,
+          BlockPublicPolicy: true,
+          IgnorePublicAcls: true,
+          RestrictPublicBuckets: true,
+        },
+        LifecycleConfiguration: Match.absent(),
+        WebsiteConfiguration: Match.absent(),
+      },
+    });
+  });
+
+  it("denies every request that is not made over TLS", () => {
+    template.hasResourceProperties("AWS::S3::BucketPolicy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Deny",
+            Action: "s3:*",
+            Condition: { Bool: { "aws:SecureTransport": "false" } },
+          }),
+        ]),
+      },
+    });
+  });
+
+  it("allows reads only to this CloudFront distribution", () => {
+    const { resource: policy } = onlyResource("AWS::S3::BucketPolicy");
+    const { key: distributionKey } = onlyResource("AWS::CloudFront::Distribution");
+    const allows = statementsOf(policy).filter((s) => s.Effect === "Allow");
+
+    expect(allows.length).toBeGreaterThan(0);
+    for (const statement of allows) {
+      expect(statement.Principal).toEqual({ Service: "cloudfront.amazonaws.com" });
+      const condition = JSON.stringify(statement.Condition);
+      expect(condition).toContain("AWS:SourceArn");
+      expect(condition).toContain(`{"Ref":"${distributionKey}"}`);
+    }
+    const actions = new Set(allows.flatMap((s) => [s.Action].flat()));
+    expect(actions).toEqual(new Set(["s3:GetObject", "s3:ListBucket"]));
+  });
+});
+
+describe("distribution", () => {
+  it("reaches the bucket only through Origin Access Control", () => {
+    onlyResource("AWS::CloudFront::OriginAccessControl");
+    template.resourceCountIs("AWS::CloudFront::CloudFrontOriginAccessIdentity", 0);
+    template.hasResourceProperties("AWS::CloudFront::OriginAccessControl", {
+      OriginAccessControlConfig: {
+        OriginAccessControlOriginType: "s3",
+        SigningBehavior: "always",
+        SigningProtocol: "sigv4",
+      },
+    });
+    template.hasResourceProperties("AWS::CloudFront::Distribution", {
+      DistributionConfig: {
+        Origins: [Match.objectLike({ OriginAccessControlId: Match.anyValue() })],
+      },
+    });
+  });
+
+  it("redirects to HTTPS, honours upload-time caching and has no error-page fallback", () => {
+    template.hasResourceProperties("AWS::CloudFront::Distribution", {
+      DistributionConfig: {
+        DefaultRootObject: "index.html",
+        DefaultCacheBehavior: {
+          ViewerProtocolPolicy: "redirect-to-https",
+          CachePolicyId: CACHING_OPTIMIZED_ID,
+          Compress: true,
+        },
+        // errorResponses would turn a missing data file into 200 + HTML (Step 5).
+        CustomErrorResponses: Match.absent(),
+        CacheBehaviors: Match.absent(),
+        PriceClass: "PriceClass_All",
+        HttpVersion: "http2and3",
+        IPV6Enabled: true,
+      },
+    });
+  });
+
+  it("runs lib/spa-rewrite.js, unchanged, on every viewer request", () => {
+    const { key: functionKey } = onlyResource("AWS::CloudFront::Function");
+    template.hasResourceProperties("AWS::CloudFront::Function", {
+      FunctionCode: readFileSync(new URL("../lib/spa-rewrite.js", import.meta.url), "utf8"),
+      FunctionConfig: { Runtime: "cloudfront-js-2.0" },
+    });
+    template.hasResourceProperties("AWS::CloudFront::Distribution", {
+      DistributionConfig: {
+        DefaultCacheBehavior: {
+          FunctionAssociations: [
+            {
+              EventType: "viewer-request",
+              FunctionARN: { "Fn::GetAtt": [functionKey, "FunctionARN"] },
+            },
+          ],
+        },
+      },
+    });
+  });
+});
+
+describe("response headers", () => {
+  it("sends the exact Content-Security-Policy and the other security headers", () => {
+    onlyResource("AWS::CloudFront::ResponseHeadersPolicy");
+    template.hasResourceProperties("AWS::CloudFront::ResponseHeadersPolicy", {
+      ResponseHeadersPolicyConfig: {
+        SecurityHeadersConfig: {
+          ContentSecurityPolicy: { ContentSecurityPolicy: CSP, Override: true },
+          StrictTransportSecurity: {
+            AccessControlMaxAgeSec: 63_072_000, // 730 days
+            IncludeSubdomains: true,
+            Override: true,
+          },
+          ContentTypeOptions: { Override: true },
+          FrameOptions: { FrameOption: "DENY", Override: true },
+          ReferrerPolicy: { ReferrerPolicy: "strict-origin-when-cross-origin", Override: true },
+        },
+      },
+    });
+  });
+
+  it("is attached to the default behaviour", () => {
+    const { key: policyKey } = onlyResource("AWS::CloudFront::ResponseHeadersPolicy");
+    template.hasResourceProperties("AWS::CloudFront::Distribution", {
+      DistributionConfig: { DefaultCacheBehavior: { ResponseHeadersPolicyId: { Ref: policyKey } } },
+    });
+  });
+});
+
+describe("deploy role", () => {
+  it("is the only role, and trusts exactly main of this repository through the imported provider", () => {
+    onlyResource("AWS::IAM::Role");
+    template.hasResourceProperties("AWS::IAM::Role", {
+      RoleName: "ProjetoAplicado2Deploy",
+      MaxSessionDuration: 3600,
+      AssumeRolePolicyDocument: {
+        Statement: [
+          {
+            Effect: "Allow",
+            Action: "sts:AssumeRoleWithWebIdentity",
+            Principal: { Federated: OIDC_PROVIDER_ARN },
+            // exact: no StringLike, no extra key, the two subjects and nothing else
+            Condition: Match.exact({
+              StringEquals: {
+                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                "token.actions.githubusercontent.com:sub": SUBJECTS,
+              },
+            }),
+          },
+        ],
+      },
+    });
+  });
+
+  it("has no wildcard anywhere in its trust policy", () => {
+    const { resource: role } = onlyResource("AWS::IAM::Role");
+    expect(JSON.stringify(role["Properties"]["AssumeRolePolicyDocument"])).not.toMatch(/[*?]/);
+  });
+
+  it("can do exactly the documented actions, on exactly this bucket and this distribution", () => {
+    const { key: roleKey, resource: role } = onlyResource("AWS::IAM::Role");
+    const { key: bucketKey } = onlyResource("AWS::S3::Bucket");
+    const { key: distributionKey } = onlyResource("AWS::CloudFront::Distribution");
+    const { resource: policy } = onlyResource("AWS::IAM::Policy");
+
+    expect(role["Properties"]["ManagedPolicyArns"]).toBeUndefined();
+    expect(role["Properties"]["Policies"]).toBeUndefined();
+    expect(policy["Properties"]["Roles"]).toEqual([{ Ref: roleKey }]);
+
+    const grants = statementsOf(policy).flatMap((statement) => {
+      expect(statement.Effect).toBe("Allow");
+      expect(statement.Condition).toBeUndefined();
+      return [statement.Action].flat().flatMap((action) =>
+        [statement.Resource].flat().map((resource) => ({ action, resource })),
+      );
+    });
+
+    expect(new Set(grants.map((g) => g.action))).toEqual(new Set(DEPLOY_ACTIONS));
+
+    const bucketArn = { "Fn::GetAtt": [bucketKey, "Arn"] };
+    for (const { action, resource } of grants) {
+      expect(resource, action).not.toBe("*");
+      if (action === "s3:ListBucket") {
+        expect(resource, action).toEqual(bucketArn);
+      } else if (action.startsWith("s3:")) {
+        expect(resource, action).toEqual({ "Fn::Join": ["", [bucketArn, "/*"]] });
+      } else {
+        const text = JSON.stringify(resource);
+        expect(text, action).toContain(`arn:aws:cloudfront::${ACCOUNT}:distribution/`);
+        expect(text, action).toContain(`{"Ref":"${distributionKey}"}`);
+      }
+    }
+  });
+});
+```
+
+Notes on the less obvious lines:
+
+- `new App({ context: cdkJsonContext() })` — the CLI reads `cdk.json`, a bare
+  `new App()` in a test does not. Without the same feature flags
+  (`minimizePolicies`, …) the tested template would differ from the deployed one.
+- The permission test expands every statement into `(action, resource)` pairs,
+  so it holds whether or not CDK merges statements, and fails on any extra
+  action, any `*` resource, any condition, or any managed policy.
+- If a CDK upgrade renames an internal detail (e.g. the logical shape of a
+  joined ARN), fix the expectation in the same PR as the upgrade — never
+  loosen it to `Match.anyValue()`.
+
+### `infra/test/spa-rewrite.test.ts`
+
+```ts
+import { readFileSync } from "node:fs";
+import { createContext, runInContext } from "node:vm";
+import { describe, expect, it } from "vitest";
+
+interface CfValue {
+  value: string;
+}
+
+interface CfRequest {
+  method: string;
+  uri: string;
+  querystring: Record<string, CfValue>;
+  headers: Record<string, CfValue>;
+  cookies: Record<string, CfValue>;
+}
+
+interface CfEvent {
+  version: "1.0";
+  context: { eventType: "viewer-request" };
+  viewer: { ip: string };
+  request: CfRequest;
+}
+
+type Handler = (event: CfEvent) => CfRequest;
+
+/**
+ * Evaluates the exact file CloudFront runs (the stack test proves the deployed
+ * code equals this file) in an empty context, like the CloudFront runtime:
+ * no require, no process, nothing leaked from the test.
+ */
+function loadHandler(): Handler {
+  const source = readFileSync(new URL("../lib/spa-rewrite.js", import.meta.url), "utf8");
+  const context = createContext({});
+  runInContext(source, context, { filename: "spa-rewrite.js" });
+  const handler: unknown = context["handler"];
+  if (typeof handler !== "function") {
+    throw new Error("spa-rewrite.js must declare a top-level function named handler");
+  }
+  return handler as Handler;
+}
+
+const handler = loadHandler();
+
+function viewerRequest(uri: string, querystring: Record<string, CfValue> = {}): CfEvent {
+  return {
+    version: "1.0",
+    context: { eventType: "viewer-request" },
+    viewer: { ip: "192.0.2.1" },
+    request: { method: "GET", uri, querystring, headers: {}, cookies: {} },
+  };
+}
+
+describe("spa-rewrite (CloudFront Function)", () => {
+  it.each([
+    "/",
+    "/candidatos",
+    "/candidatos/",
+    "/candidatos/a-b-123",
+    "/sobre",
+  ])("serves the app shell for the route %s", (uri) => {
+    expect(handler(viewerRequest(uri)).uri).toBe("/index.html");
+  });
+
+  it.each([
+    "/index.html",
+    "/data/latest.json",
+    "/data/20990101T000000Z/index.json",
+    "/data/20990101T000000Z/candidates/a-b-123.json",
+    "/data/20990101T000000Z/photos/240000000001.jpg",
+    "/data/20990101T000000Z/dataset.sqlite",
+    "/assets/x.js",
+    "/assets/index-3f2a9c.css",
+    "/favicon.svg",
+    "/robots.txt",
+  ])("leaves the file %s untouched, so a missing file stays a 404", (uri) => {
+    expect(handler(viewerRequest(uri)).uri).toBe(uri);
+  });
+
+  it("keeps the query string, so search filters survive a reload", () => {
+    const querystring = { q: { value: "maria" }, cargo: { value: "federal" } };
+    const result = handler(viewerRequest("/candidatos", querystring));
+    expect(result.uri).toBe("/index.html");
+    expect(result.querystring).toEqual(querystring);
+  });
+
+  it("returns the request, never a response, so CloudFront continues to the origin", () => {
+    const result = handler(viewerRequest("/sobre"));
+    expect(result.method).toBe("GET");
+    expect(result).not.toHaveProperty("statusCode");
+  });
+});
+```
+
+### Run them
+
+```bash
+cd infra
+npm test        # vitest run --coverage: all green, coverage table printed (no threshold)
+```
+
+From the repository root: `make test-infra`.
+
 ## Step 7 — Check it locally (no credentials needed)
+
+Exactly what the CI job `Infrastructure (CDK)` runs:
 
 ```bash
 cd infra
 npm run lint
 npm run typecheck
+npm test                       # assertion tests (Step 6b); coverage reported
 npx cdk synth --quiet          # writes cdk.out/, prints nothing on success
 ```
 
@@ -523,7 +1012,10 @@ aws cloudfront test-function --name "$FN" --if-match "$ETAG" --stage LIVE \
 
 ## Changing the stack later
 
-1. Edit `infra/lib/site-stack.ts` in a branch; CI runs `cdk synth`.
+1. Edit `infra/lib/site-stack.ts` in a branch. If the change deliberately
+   alters an invariant (a new header, a new permission), update the matching
+   assertion in `infra/test/site-stack.test.ts` **in the same PR**, and say
+   why in the PR description. CI runs the tests and `cdk synth`.
 2. After merge, the AWS account owner runs `make infra-diff` and `make infra-deploy`.
 3. If an output changed (it should not — names are stable), update the
    repository variables.
@@ -536,3 +1028,14 @@ aws cloudfront test-function --name "$FN" --if-match "$ETAG" --stage LIVE \
 3. Point the domain's DNS at the distribution (CNAME, or an alias record if
    the zone is in Route 53).
 4. Update `SITE_URL`. Nothing already deployed is rebuilt.
+
+## Done when
+
+- [ ] `npm run lint`, `npm run typecheck` and `npm test` pass in `infra/`; the
+      coverage table is printed (no threshold).
+- [ ] Every row of the invariants table in Step 6b has a passing test, and
+      `spa-rewrite.test.ts` covers the full rewrite table.
+- [ ] `npx cdk synth --quiet` is clean and the trust policy shows exactly the two subjects.
+- [ ] The CI job `Infrastructure (CDK)` is green on the PR that adds `infra/`.
+- [ ] The stack is deployed (Step 8), its outputs recorded (Step 9) and the
+      read-only checks of Step 10 pass.

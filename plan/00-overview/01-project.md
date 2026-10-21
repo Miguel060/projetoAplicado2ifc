@@ -87,8 +87,15 @@ The TSE only publishes *propostas de governo* for **executive** offices
 | Accounts, login, comments, ratings | Not needed, and ratings/comments would break impartiality. |
 | Admin panel | Nothing is edited by hand, so there is nothing to administer. |
 | Analytics / trackers | Privacy, and a neutral public-interest site should not profile visitors. |
-| Automated test suites | Explicit instruction: **production code only**. Quality is ensured by compilers, type checks, linters, runtime validation in the ETL and a manual QA checklist (see `07-delivery/02-launch-checklist.md`). |
 | Custom domain | Optional. CloudFront serves HTTPS on its own `*.cloudfront.net` name. |
+
+## Quality bar
+
+Every step ships with its tests, and nothing deploys unless they pass:
+backend and frontend at **≥ 85 % coverage**, end-to-end tests in Chromium and
+WebKit with automated accessibility checks, CDK assertion tests for the
+security invariants, and an interactive check of every frontend step with
+Claude in Chrome. See D15 and `01-foundation/05-testing-strategy.md`.
 
 ## Schedule (from Modelo 4 — Registro de Atividades)
 

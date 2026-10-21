@@ -30,7 +30,8 @@ frontend/src/
 │   ├── SearchPage.tsx
 │   └── NotFoundPage.tsx
 └── lib/
-    └── search-params.ts      # parse/serialise the URL state
+    ├── search-params.ts      # parse/serialise the URL state
+    └── search.ts             # applySearch() — filter + sort (Step 3)
 ```
 
 ---
@@ -109,7 +110,7 @@ Updating: `setSearchParams(toSearchParams(next), { replace: true })`.
 `replace: true` so typing "joão" does not create four history entries; the
 back button leaves the page instead of undoing keystrokes.
 
-## Step 3 — Filtering and sorting algorithm
+## Step 3 — Filtering and sorting algorithm (`src/lib/search.ts`)
 
 Pure function, runs on every render (≈45 items — no memoisation or debounce
 needed for performance):
@@ -309,6 +310,54 @@ React 19 hoists `<title>` and `<meta>` rendered anywhere to `<head>`:
 
 The page `h1`: "Candidatos a deputado ligados a Videira" (visible).
 
+## Tests for this step
+
+Unit tests (Vitest):
+
+| File | Cases |
+|---|---|
+| `src/lib/search-params.test.ts` | `parseSearch` of an empty query → all defaults; each valid param parsed (`cargo=deputado-federal` → `federal_deputy`, `situacao=suplentes`, `partido=PTX`, `ordem=nome`); unknown values (`cargo=foo`, `situacao=x`, `ordem=xyz`, a party not in the index) fall back to defaults without throwing. `toSearchParams` writes only non-default values (default state → empty string). **Round trip:** for a table of states, `parseSearch(toSearchParams(state)) ≡ state`; for a table of query strings, `toSearchParams(parseSearch(qs))` is the canonical form (e.g. `?ordem=votos-videira` → empty). |
+| `src/lib/search.test.ts` | with a fixture of ~8 synthetic summaries across both offices: text query (accent-insensitive, multi-token, number, party acronym); each filter alone and combined; each result group maps to the right codes (including `other` under "sem-resultado"); sort `votos-videira` by rank asc with alphabetical tie-break; `votos-sc` by state votes desc; `nome` with the pt-BR collator ("Álvaro" before "Bruno", "Ana 2" before "Ana 10"); input array not mutated. |
+
+Component tests (Testing Library, `renderRoute("/candidatos?…")`):
+
+| File | Cases |
+|---|---|
+| `src/pages/SearchPage.test.tsx` | without `cargo`: two sections "Deputados(as) federais" then "Deputados(as) estaduais"; with `cargo`: one section; typing in the search box (`userEvent.type`) filters the list and updates the router location to `?q=…` with `replace` (history length unchanged); changing each `<select>` updates the URL; "Limpar filtros" appears only when a param is set, clears the URL and focuses the search input; selection-rule sentence uses `topN` and the election date from the fixture; "Ordenação atual: …" sentence follows the sort; empty state text and its "Limpar filtros" button; a section with zero results shows "Nenhum resultado neste cargo." |
+| `src/components/ResultsSummary.test.tsx` | the visible count updates immediately; the `aria-live` text updates only after 500 ms (`vi.useFakeTimers()`); singular/plural wording. |
+| `src/components/CandidateCard.test.tsx` | exactly one link, named by the ballot name, pointing to `/candidatos/<slug>` with `state.from` = current search; fields in the documented order; badge text = `resultLabel`; placeholder rendered (and `aria-hidden`) when `photo` is null; photo `alt=""` otherwise; the same classes for an elected and a not-elected candidate (neutrality). |
+| `src/components/NativeSelect.test.tsx` | renders a native `select` associated with its `label`; forwards `value`/`onChange`. |
+| `src/pages/NotFoundPage.test.tsx` | heading, the three links (`/candidatos`, `/`, `/sobre`), no `main` element of its own. |
+
+End-to-end (Playwright, golden snapshot, both projects, shared fixture):
+
+| File | Scenario |
+|---|---|
+| `e2e/search.spec.ts` | `/candidatos` lists the golden candidates in two sections; **URL round trips:** type a query, pick office/result/party/sort → the URL holds exactly those params; reload → same view; open the URL in a new page → same view; `?ordem=xyz&cargo=foo` → default view without errors. **Back navigation:** filter, scroll, open a profile, press "Voltar para a lista de candidatos" → same filters; repeat with `page.goBack()` → same filters and scroll position. **Typing history:** after typing 5 characters, one `goBack()` leaves `/candidatos`. **Keyboard:** Tab order search box → Cargo → Situação → Partido → Ordenar por → (Limpar filtros) → first card link; Enter on a card opens the profile. **Screen-reader text:** the live region's text equals the count after typing stops. Zero axe violations on the default and on a filtered view; zero console errors. On `webkit` (iPhone 13): no horizontal scroll (`document.documentElement.scrollWidth <= innerWidth`). |
+| `e2e/not-found.spec.ts` | `/qualquer-coisa` → "Página não encontrada" with its three links; zero axe violations. |
+
+## Browser check (Claude in Chrome)
+
+Procedure: `08-testing.md`. Serve with `npm run build && npm run preview`
+using a local `make ingest` snapshot (real data shapes) — fall back to the
+golden snapshot if the ETL is not available.
+
+- **Controls to exercise:** the search box (a name with accents typed without
+  them, a ballot number, a party acronym); each `<select>` — Cargo, Situação,
+  Partido, Ordenar por — through every option; "Limpar filtros"; a card link;
+  "Voltar para a lista de candidatos" on the profile; the browser back
+  button; the "Como os dados são reunidos" link.
+- **URL:** after each change, read the address bar (`tabs_context_mcp` or a
+  screenshot) and confirm the params; reload and confirm the same view.
+- **Keyboard:** full pass from the skip link through the filters to the first
+  three cards; Enter opens a profile; focus lands on the profile `h1`.
+- **Widths:** 360 × 800 (one column, filters stacked) and 1440 × 900 (three
+  columns, filters in one row); no horizontal scroll at 360.
+- **Console:** `read_console_messages` with pattern `error|Uncaught|Warning|Content Security` → nothing.
+- **Network:** `read_network_requests` → no repeated `latest.json`/`index.json` while filtering; photos only for visible cards (lazy loading).
+- **GIF:** `step-19-search.gif` (type → filter → sort → open profile → back).
+- **Fallback:** Playwright MCP or a throw-away script, noted in the PR.
+
 ## Done when
 
 - [ ] `/candidatos` is reachable from the landing page's "Ver candidatos" button and from the navigation; the "Candidatos" nav item shows as current (`aria-current="page"`) on `/candidatos` and on profiles.
@@ -322,3 +371,6 @@ The page `h1`: "Candidatos a deputado ligados a Videira" (visible).
 - [ ] Each card is one link in the screen reader's links list, named after the candidate.
 - [ ] At 320 px wide and at 200 % zoom, no horizontal scrolling and nothing overlaps.
 - [ ] A candidate without a photo shows the same placeholder as every other one without a photo.
+- [ ] `make test-frontend` is green with coverage ≥ 85 % on all four metrics.
+- [ ] `make test-e2e` is green on `chromium` and `webkit`.
+- [ ] The browser check above is done and its GIF is referenced in the PR description.

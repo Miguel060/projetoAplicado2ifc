@@ -13,6 +13,7 @@ Implement decision **D1** exactly, deterministically, in one place:
 
 ```
 backend/internal/selection/selection.go
+backend/internal/selection/selection_test.go
 ```
 
 ## Types and signature
@@ -43,6 +44,7 @@ type Result struct {
 func Select(cands tse.Candidates, votes tse.Votes, topN int) (*Result, error)
 func (r *Result) IDs() map[string]bool
 func (r *Result) ForgetCPFs() // sets C.CPF = "" for every candidate it references
+func (r *Result) Counts() map[string]int // per office
 ```
 
 ## Algorithm
@@ -118,6 +120,31 @@ federal candidate is `INDEFERIDO` and is therefore excluded. Expected total:
 - Floating-point shares: compute from integers, round once at the end.
 - `BirthCity` may be `nil` (`-3` in the file): never dereference blindly.
 
+## Tests for this step
+
+`selection_test.go` — pure, in-memory. A helper builds `tse.Candidates` and
+`tse.Votes` from compact tables (`office, id, votes, birthCity, birthUF,
+status`), so each case is a few lines. No fixtures; `TopN = 20` unless stated.
+
+| Test | Cases |
+|---|---|
+| `TestTopNNoTie` | 30 candidates with distinct votes → exactly 20 `top_votes`; ranks 1…20 |
+| `TestTieAtPosition20` | positions 20 and 21 have the same votes → **21** selected, both with rank 20; position 22 excluded |
+| `TestTieAcross19To22` | positions 19–22 tied → 22 selected, all rank 19 (competition ranking "1224") |
+| `TestCompetitionRanks` | votes `[50, 40, 40, 30]` → ranks `[1, 2, 2, 4]` |
+| `TestZeroVotesNeverTop` | population of 5 with two zero-vote candidates and `TopN = 20` → 3 `top_votes` |
+| `TestPopulationSmallerThanTopN` | 4 candidates, all with votes → all 4 selected |
+| `TestBornInMunicipality` | `DEFERIDO` + born in `VIDEIRA`/`SC` with 0 votes → selected with reason `born_in_municipality` and its **real** rank among all candidates; `INDEFERIDO` + born in Videira → **excluded**; born in a `VIDEIRA` of another UF → excluded; `BirthCity = nil` → no panic; `"Videira"` (mixed case/accents) matches via `textnorm.Norm` |
+| `TestBothReasons` | top-20 and born in Videira → reasons exactly `["top_votes", "born_in_municipality"]` |
+| `TestShares` | 120 of 26315 → 0.0046 (4 decimals); office total 0 → share 0 (no NaN) |
+| `TestDeterministicOrder` | the same input in 50 random permutations → identical output order (office, rank, ballot name, id) |
+| `TestOfficesIndependent` | a tie in federal does not change state results |
+| `TestForgetCPFs` | after `ForgetCPFs`, every referenced candidate has `CPF == ""` |
+| `TestCounts` | `Counts()` per office equals the list |
+
+The pipeline-level behaviour (F3/F4 tie at `TopN = 3`, F6 in, F7 out) is
+asserted again in the integration test (step 09).
+
 ## Done when
 
 ```bash
@@ -130,4 +157,5 @@ sqlite3 "$DS" "SELECT c.office, v.rank, v.votes, s.reasons, c.ballot_name
                ORDER BY c.office, v.rank;"
 # The 20th row per office must have votes >= the 21st candidate in the full file,
 # and every born_in_municipality row must have candidacy_status = 'DEFERIDO'.
+make test-backend               # all tests pass, total coverage >= 85%
 ```

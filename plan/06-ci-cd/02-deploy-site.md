@@ -10,8 +10,12 @@ The same model as the PacketLaboratory project in this AWS account:
 - **one** deploy workflow, `deploy.yml`;
 - it runs on **every push to `main`** (no `paths` filter) and on the manual
   "Run workflow" button;
-- its first job, `verify`, **is** `ci.yml` (reused via `workflow_call`), so a
-  red build can never reach CloudFront;
+- its first job, `verify`, **is** `ci.yml` (reused via `workflow_call`). Since
+  decision D15 that means **all tests** — Go unit + pipeline integration tests
+  with the 85 % gate, Vitest unit/component tests with the 85 % gate,
+  Playwright end-to-end in Chromium and WebKit against the golden snapshot,
+  and the CDK assertion tests. **A single red test blocks the deploy**;
+  nothing is published until all four jobs are green;
 - then one `deploy` job builds the React app and publishes it with
   short-lived OIDC credentials;
 - infrastructure is **not** deployed here — `cdk deploy` stays manual
@@ -62,8 +66,9 @@ permissions:
   contents: read
 
 jobs:
-  # The same checks CI runs, reused rather than restated. `vite build` does not
-  # type-check, so without this a type error would deploy perfectly happily.
+  # The same checks CI runs, reused rather than restated: format, vet, lint,
+  # typecheck, ALL tests with the 85% coverage gates, end-to-end in Chromium and
+  # WebKit, CDK assertions, build and synth. Any red job stops the deploy here.
   verify:
     uses: ./.github/workflows/ci.yml
 
@@ -239,7 +244,8 @@ jobs:
    content above. CI runs on the branch push; the deploy itself does not
    (it only triggers on `main`).
 3. Open a PR, get it reviewed, merge. The merge is a push to `main`, so
-   `Deploy` starts: `verify` (three CI jobs) → `Publish to CloudFront`.
+   `Deploy` starts: `verify` (the four CI jobs, all tests included) →
+   `Publish to CloudFront`.
 4. Watch the run in the **Actions** tab. Every step must be green; the
    "Smoke check" step prints each path and its status.
 5. Open `SITE_URL` in a browser. The first real deploy is the **landing
@@ -278,6 +284,7 @@ Data is unaffected (see `07-delivery/02-launch-checklist.md` for data rollback).
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| `verify` red, `Publish to CloudFront` skipped | A test, coverage gate, lint or typecheck failed | Fix on a branch → PR → merge. `06-ci-cd/01-ci.md` → Troubleshooting. Never bypass by deploying by hand. |
 | `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Run not from `main`, or the OIDC `sub` shape differs | `05-infrastructure/02-github-oidc-and-variables.md` → Troubleshooting |
 | "Repository variable … is empty" | Variables not created yet | Repository admin creates them (05.02) |
 | "Expected account 436812234154, got …" | The role ARN variable points at another account | Fix `AWS_DEPLOY_ROLE_ARN` |
@@ -288,7 +295,8 @@ Data is unaffected (see `07-delivery/02-launch-checklist.md` for data rollback).
 
 ## Done when
 
-- [ ] A merge to `main` runs `verify` then `Publish to CloudFront`, all green.
+- [ ] A merge to `main` runs `verify` (four CI jobs, all tests) then `Publish to CloudFront`, all green.
+- [ ] A failing test on `main` (e.g. after an admin bypass) stops the run at `verify`; nothing is uploaded.
 - [ ] `/`, `/candidatos`, `/candidatos/nao-existe` and `/sobre` all return `200 text/html`.
 - [ ] `SITE_URL/data/nao-existe.json` returns `404`.
 - [ ] The security headers appear on `curl -sI "$SITE_URL/"`.

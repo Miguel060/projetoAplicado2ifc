@@ -232,6 +232,45 @@ until the group defines it). Render it as a `mailto:` link.
 
 ---
 
+## Tests for this step
+
+Component tests (`renderRoute("/sobre")` with a fixture index):
+
+| File | Cases |
+|---|---|
+| `src/pages/AboutPage.test.tsx` | the ten `h2`s in order, each with its anchor id (`projeto`, `criterio`, `o-que-e-mostrado`, `fontes`, `atualizacao`, `imparcialidade`, `privacidade`, `dados`, `creditos`, `contato`); **every dynamic value comes from the fixture** — change `topN`, `counts`, `election.date`, `version`, `generatedAt` in the fixture and assert the new values appear; the credits contain `<NOMES DO GRUPO>` (or the real names once filled) and the disclaimer "Este não é um site oficial de nenhum órgão público"; the strings "Câmara Municipal", "Vereadores", "parceir" do not occur anywhere in the rendered text; the contact link is `mailto:` + `CONTACT_EMAIL`. |
+| `src/components/about/SourcesTable.test.tsx` | caption; one row per source, grouped TSE → Câmara dos Deputados → CGU, sorted by name inside a group; `generatedAt: null` → "não informado pela fonte"; dataset name is an `ExternalLink`. |
+| `src/components/about/DatasetDownload.test.tsx` | link `href` = `dataUrl(version, dataset.path)` with the `download` attribute; label includes `formatBytes(dataset.bytes)`; the SHA-256 is rendered in a `code` element; repository link present. |
+
+End-to-end (Playwright, golden snapshot, both projects):
+
+| File | Scenario |
+|---|---|
+| `e2e/about.spec.ts` | the sources table has one row per key of the golden `index.sources`; **download link:** `page.waitForEvent("download")` after clicking "Baixar o conjunto de dados" → the saved file's SHA-256 (Node `crypto`) equals the hash shown on the page and the golden `index.dataset.sha256`; **anchors:** `/sobre#criterio`, `#fontes`, `#o-que-e-mostrado`, `#dados` put their heading in the viewport below the header; **no data:** with `latest.json` fulfilled as 404, `/sobre` shows "Os dados estão em preparação" inside the layout. Zero axe violations, zero console errors. |
+
+## Browser check (Claude in Chrome)
+
+Procedure: `08-testing.md`. Serve with `npm run build && npm run preview`
+(local snapshot, golden as fallback).
+
+- **Controls to exercise:** every link of the "Nesta página" list; every
+  dataset link in the sources table (opens a new tab — close it); the
+  download button (confirm a `.sqlite` download starts; compare its size with
+  the label); the repository link; the `mailto:` link (only hover/inspect —
+  do not send); the links arriving here from other pages (`/candidatos` →
+  "Como os dados são reunidos", footer "Fontes oficiais", profile "Por que
+  isso?") land on the right heading.
+- **Read the page** against the data: `topN`, counts, dates and version match
+  `index.json`; no institution is presented as partner; the disclaimer is
+  present here and in the footer.
+- **Keyboard:** full Tab pass; the download link is reachable and activates
+  with Enter; the sources table region scrolls with arrows at 360 px.
+- **Widths:** 360 × 800 (hash wraps, table scrolls inside its region) and 1440 × 900.
+- **Console:** `read_console_messages` with pattern `error|Uncaught|Content Security` → nothing.
+- **Network:** `read_network_requests` → the `dataset.sqlite` request answers 200 from the same origin.
+- **GIF:** `step-22-about.gif`.
+- **Fallback:** Playwright MCP or a throw-away script, noted in the PR.
+
 ## Done when
 
 - [ ] Every number, date, count, source and the SHA-256 on the page come from `index.json` (change a value in the local `index.json` and see it change on the page).
@@ -242,3 +281,6 @@ until the group defines it). Render it as a `mailto:` link.
 - [ ] The "não é um site oficial de nenhum órgão público" sentence appears on this page and in the footer of every page.
 - [ ] Searching the built site's text (landing, about, footer, `index.html`) for "Câmara Municipal", "Vereadores", "parceir" and "apoio" finds nothing.
 - [ ] The placeholders `<NOMES DO GRUPO>`, `<CONTACT_EMAIL>` and `<REPOSITORY_URL>` have been replaced before launch (listed in `07-delivery/02-launch-checklist.md`).
+- [ ] `make test-frontend` is green with coverage ≥ 85 % on all four metrics.
+- [ ] `make test-e2e` is green on `chromium` and `webkit`.
+- [ ] The browser check above is done and its GIF is referenced in the PR description.

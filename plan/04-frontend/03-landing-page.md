@@ -315,6 +315,49 @@ completa de bases utilizadas, com datas, em Sobre e metodologia." (link →
 - Sentence case headings, plain Portuguese, short paragraphs (aim for text a
   first-time voter understands).
 
+## Tests for this step
+
+Component tests (Vitest + Testing Library, `renderRoute("/")` with fetch
+mocks — `08-testing.md`):
+
+| File | Cases |
+|---|---|
+| `src/components/SiteLayout.test.tsx` | skip link is the first focusable element and targets `#conteudo`; one `header`, one `nav` named "Principal", one `main`, one `footer`; "Início" has `aria-current="page"` only on `/`, "Candidatos" on `/candidatos` **and** `/candidatos/x`; footer freshness line absent on `/`, present on `/candidatos`; footer disclaimer text present; the text "Câmara Municipal" appears nowhere; after a pathname change focus moves to the new `h1`, after a query-string change it does not. |
+| `src/pages/LandingPage.test.tsx` | **renders all sections with a fetch that never resolves** (proves no blocking on data): `h1`, the strip in its loading text, "Para que serve", "O que você encontra" (8 cards), "Como funciona" (3 list items, `id="como-funciona"`), "Quem aparece aqui" (no-number wording), "Compromisso de imparcialidade", "Fontes oficiais" (3 external links). **`latest.json` 404** → strip "Dados em preparação". **`schemaVersion: 2`** → "Dados em preparação". **fetch rejects** → "Dados em preparação". **With data** → strip text "{N} candidatos · {M} fontes oficiais · atualizado em DD/MM/AAAA" computed from the fixture, and "os {topN} candidatos mais votados" in "Quem aparece aqui". "Ver candidatos" links to `/candidatos`; "Como funciona" is `href="#como-funciona"`. No candidate name from the fixture appears on the page. |
+| `src/components/landing/StatsStrip.test.tsx` | the three states render the documented text; the element keeps the same min-height class in every state; not an `aria-live` region. |
+
+End-to-end (Playwright, both projects, shared fixture):
+
+| File | Scenario |
+|---|---|
+| `e2e/landing.spec.ts` | **No data** (`page.route("**/data/latest.json", r => r.fulfill({ status: 404 }))`): every section heading visible, strip "Dados em preparação", zero console **errors** other than the expected 404 resource message, zero axe violations. **Schema mismatch** (`latest.json` with `schemaVersion: 2`): same. **Golden snapshot:** strip shows the counts and date from the golden `index.json`; "Ver candidatos" navigates to `/candidatos`; navigating there issues **no** second `latest.json`/`index.json` request. **Slow data** (`page.route` that delays `latest.json` by 3 s): the hero `h1` and "Ver candidatos" are visible before the figures; the strip's bounding box height is unchanged after they arrive. **Anchor:** clicking "Como funciona" brings its `h2` into the viewport and not under the header. **Keyboard:** from page load, Tab reaches skip link → site name → Início → Candidatos → Sobre e metodologia → Ver candidatos → Como funciona, each with a visible focus outline (computed `outline-style` not `none`). |
+
+## Browser check (Claude in Chrome)
+
+Procedure: `08-testing.md`. Serve with `npm run build && npm run preview`.
+
+- **Without data first:** serve with an empty data dir
+  (`E2E_DATA_DIR=/tmp/empty-data npm run preview`). Load `/`; confirm every
+  section renders and the strip says "Dados em preparação".
+- **Then with data** (local `make ingest` output or the golden snapshot):
+  confirm the strip figures match `index.json`.
+- **Controls to exercise:** "Ver candidatos" (lands on `/candidatos`);
+  "Como funciona" (scrolls to the section, heading visible); the three nav
+  items; the three "Fontes oficiais" external links (open in a new tab — close
+  it again); "Detalhes da metodologia" and "Veja o critério completo" links;
+  the footer links.
+- **Keyboard:** full Tab pass from the top; skip link works (Enter moves
+  focus into `main`); focus ring always visible.
+- **Widths:** 360 × 800 (CTAs stacked, cards in one column, no horizontal
+  scroll) and 1440 × 900 (cards in four columns).
+- **Console:** `read_console_messages` with pattern `error|Uncaught|Content Security|Refused`
+  → nothing in the data run; only the expected `latest.json` 404 in the
+  empty-data run.
+- **Network:** `read_network_requests` → same origin only; after clicking
+  "Ver candidatos", no repeated `latest.json`/`index.json`.
+- **GIF:** `step-09-landing.gif` (empty-data load → data load → "Ver candidatos").
+- **Fallback:** Playwright MCP or a throw-away script, noted in the PR.
+
 ## Done when
 
 - [ ] **Before any data exists** (empty `backend/dist/data` locally, or a freshly created bucket with only the site deployed): `/` renders every section, the strip says "Dados em preparação", "Quem aparece aqui" shows the no-number wording, and the browser console shows no uncaught error.
@@ -326,3 +369,6 @@ completa de bases utilizadas, com datas, em Sobre e metodologia." (link →
 - [ ] The landing page contains no candidate name or photo, no logo of any body, and no mention of any institution as partner.
 - [ ] Nav: "Início" is current only on `/`; "Candidatos" is current on `/candidatos` and on profiles.
 - [ ] Keyboard: skip link, hero buttons, nav and every link reachable in order with a visible focus ring; one `h1`, then `h2`s, then `h3`s.
+- [ ] `make test-frontend` is green with coverage ≥ 85 % on all four metrics.
+- [ ] `make test-e2e` is green on `chromium` and `webkit`, including the no-data and schema-mismatch landing scenarios.
+- [ ] The browser check above is done and its GIF is referenced in the PR description.

@@ -29,6 +29,11 @@ backend/internal/store/store.go     # Dataset, Write
 backend/internal/export/types.go    # Go mirror of the TS contract
 backend/internal/export/export.go   # Write, WriteLatest
 backend/internal/export/slug.go     # Slug, uniqueness check
+# tests (next to the code):
+backend/internal/store/store_test.go
+backend/internal/export/slug_test.go
+backend/internal/export/export_test.go
+backend/internal/export/builders_test.go  # tiny in-memory Dataset builders shared by the export tests
 ```
 
 ## Part A — `store.Write`
@@ -237,6 +242,37 @@ diffs reviewable:
 - Never include `full_name`-based or CPF-based identifiers in file names; only
   slug and `tseId`.
 
+## Tests for this step
+
+No upstream needed: the tests build a small `store.Dataset` in memory
+(`builders_test.go`: one federal incumbent with every block, one state
+deputy running for re-election, one candidate with every optional field
+empty), write it to `t.TempDir()`, and inspect the SQLite file and JSON.
+
+| File | Test | Cases |
+|---|---|---|
+| `store_test.go` | `TestSchemaApplies` | fresh file; `PRAGMA foreign_key_check` empty; every table of `01-foundation/03-data-model.md` exists |
+| | `TestRebuild` | writing twice to the same path → one run's rows only (file replaced, not appended) |
+| | `TestNoSideFiles` | no `-wal` / `-shm` files next to `dataset.sqlite` |
+| | `TestCPFNeverPersisted` | the input `tse.Candidate` **has** `CPF = "11111111111"` (as if `ForgetCPFs` had not run) → no column name matches `%cpf%` in any table (`pragma_table_info`), **and** no TEXT cell in any table matches `^\d{11}$` (scan of every table/column), **and** the bytes of the file do not contain `11111111111` |
+| | `TestNoDonorData` | finance input carrying donor strings is impossible by type; assert `amendment_beneficiary` never contains a natural person's name (input has one) |
+| | `TestRanksAndScopes` | municipality row has `rank`, state row has `rank IS NULL` |
+| `slug_test.go` | `TestSlug` | `("JOSÉ DA CONCEIÇÃO TESTE", "9903")` → `jose-da-conceicao-teste-9903`; `("DR. FULANO", "9901")` → `dr-fulano-9901` (no dot); `("D'ÁVILA", "99001")` → `d-avila-99001` |
+| | `TestCheckSlug` | accepts `a-b-123`; rejects `a.b-1`, `A-1`, `-a-1`, `a--b-1`, `""`, `a b-1`, `ação-1` — every accepted value matches `^[a-z0-9-]+$` |
+| | `TestDuplicateSlugAborts` | two candidates with the same ballot name and number → `export.Write` returns `duplicate slug`, nothing written |
+| `export_test.go` | `TestIndexShape` | decodes into the contract structs **with `DisallowUnknownFields`**; `schemaVersion = 1`; 11 sources; counts per office; order = office, rank, name |
+| | `TestNoOmitEmpty` | reflect over every export type: no `json` tag contains `omitempty` |
+| | `TestArraysNeverNull` | the "everything empty" candidate → `assets.items`, `social.links`, `campaignFinance.revenue.byOrigin`, … are `[]` in the raw JSON (decode to `map[string]any`), never `null` |
+| | `TestNullableBlocks` | candidate without Câmara record → `chamber: null` **and** `amendments: null`; state deputy running for re-election → `stateAssembly.profileUrl` = ALESC URL; federal → `stateAssembly: null`; `officialLinks.tseCandidatePage: null`; every `Amendment.url: null` while the pattern is empty |
+| | `TestCaps` | 60 bills → `items` has 50, `total` 60, most recent first; 30 votes → `recent` has 20 |
+| | `TestSortsAndTieBreakers` | equal `presented_at` → `bill_id` desc; equal totals in `byCategory` → name asc |
+| | `TestRounding` | money 2 decimals, shares 4 decimals in the raw JSON text |
+| | `TestSearchText` | contains normalised ballot name, full name, social name, number, party acronym |
+| | `TestDatasetHash` | `index.dataset.sha256`/`bytes` equal the file's |
+| | `TestDeterministic` | two `Write` calls from the same `Dataset` → byte-identical JSON files |
+| | `TestPhotos` | photo bytes copied verbatim; `photo` null when absent |
+| | `TestWriteLatest` | content exactly `{"schemaVersion":1,"version":…,"generatedAt":…}`; written via tmp + rename (no `.tmp` left) |
+
 ## Done when
 
 ```bash
@@ -249,4 +285,5 @@ f=$(ls dist/data/$V/candidates | head -1)
 jq '{chamber: (.chamber != null), amendments: (.amendments != null), assets: (.assets.items | length)}' dist/data/$V/candidates/$f
 shasum -a 256 dist/data/$V/dataset.sqlite; jq -r .dataset.sha256 dist/data/$V/index.json   # identical
 grep -rl '"cpf"' dist/data/$V || echo "no cpf anywhere"
+cd .. && make test-backend      # all tests pass, total coverage >= 85%
 ```

@@ -203,8 +203,8 @@ The TSE files contain CPF, voter ID, e-mail. Rules:
 
 ## D11 — Scope of the docs
 
-**Decided:** these documents cover **production code only** — no automated
-test suites. They are written in English, organised as a tree, and
+**Decided:** these documents cover the production code **and its tests**
+(D15). They are written in English, organised as a tree, and
 **versioned publicly in the repository** under `plan/`.
 
 Because they are public, they never contain personal data, e-mail
@@ -213,7 +213,7 @@ to by role (repository owner, AWS account owner, backend lead, frontend lead).
 Identifiers that must appear in the code anyway — the AWS account id, the
 GitHub owner/repository ids — are allowed.
 
-(Changed 2026-10-21: the first version kept `plan/` git-ignored.)
+(Changed 2026-10-21: the first version kept `plan/` git-ignored and excluded tests.)
 
 ---
 
@@ -264,3 +264,54 @@ cancelled midway (a half-finished sync would serve a mix of two builds).
 
 **Rejected:** a hero section on top of the search at `/` (the explanation
 competes with the tool, and that page cannot ship before the data does).
+
+---
+
+## D15 — Tests gate every deploy
+
+**Decided (2026-10-21), replacing "production code only":** backend,
+frontend and infrastructure all carry unit and integration tests, written in
+the same PR as the code they cover, and run before any deploy. Full contract:
+`01-foundation/05-testing-strategy.md`.
+
+| | Decision |
+|---|---|
+| Backend | Go `testing`; unit tests per package; one **integration test of the whole pipeline** against an in-process fake upstream (no network); its output is a committed **golden snapshot** |
+| Frontend | Vitest + Testing Library (unit/component); **Playwright** end-to-end on the production build against the golden snapshot, with **axe** accessibility checks |
+| Browsers (e2e) | **Chromium** (desktop) + **WebKit** (iPhone 13) |
+| Infrastructure | CDK assertion tests pinning the security invariants |
+| Coverage gate | **85 %** on backend (`./internal/...`) and frontend (`src/`, generated UI excluded); infra coverage reported only |
+| Per-step browser check | every frontend step is exercised interactively with **Claude in Chrome** before its PR (Playwright when scripting is needed) |
+| Where they run | `ci.yml` (which `deploy.yml` reuses as its `verify` job) and `refresh-data.yml` (Go tests before the ETL) |
+| Test data | synthetic only — real column layouts and encodings, invented values, fake CPFs (public repo, D10) |
+
+Why the golden snapshot matters: the frontend's end-to-end tests run against
+the backend's actual output, so a JSON contract break fails CI in the PR that
+causes it.
+
+Cost: more time per step. The 85 % gate was chosen deliberately over a
+lower one; if the 2026-11-19 deadline is at risk, lower it in this entry —
+never by skipping tests silently.
+
+---
+
+## D16 — The ingestion runs on GitHub Actions, not AWS Lambda
+
+**Decided (2026-10-21).** Cost is *not* the reason — a Lambda would also be
+nearly free, and a Lambda outside a VPC reaches the internet without a NAT
+Gateway. The reasons:
+
+| | GitHub Actions | AWS Lambda |
+|---|---|---|
+| Same pipeline as the code | the ETL runs after `go test`, from the same checkout; a push touching `backend/` re-runs it with the new code | build and deploy the function, then invoke it — a second release path to keep in sync |
+| Who can see and run it | all members see logs and history, get failure e-mails, and have a "Run workflow" button — no AWS access needed | only people with AWS access see CloudWatch logs or trigger runs |
+| Infrastructure to build and secure | none beyond the existing deploy role (short-lived OIDC credentials scoped to the bucket) | function, role, EventBridge schedule, log group, failure alerting (SNS), Go packaging for `provided.al2023` |
+| Limits | 6 h per job; 4 vCPU / 16 GB RAM / ~14 GB disk; free for a public repository | 15 min per run; 512 MB `/tmp` by default — workable, but Câmara API retries on 504s can push the run time up |
+| Local parity | `make ingest` is the same command | the deployed function differs from a local run |
+
+Costs accepted: scheduled workflows pause after 60 days without repository
+activity (documented in `06-ci-cd/03-refresh-data.md`), cron start times
+are approximate, and a GitHub outage skips that refresh (the site keeps
+serving the last snapshot).
+
+**Revisit if:** the data must refresh hourly, or independently of GitHub.

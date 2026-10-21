@@ -10,9 +10,17 @@ concrete rules a developer can follow and a reviewer can check by hand:
 2. **Responsiveness:** works from a 320 px phone to a desktop, mobile first.
 3. **Neutrality:** the UI itself never favours, ranks or judges a candidate.
 
-Per the project scope there are **no automated test suites**; verification is
-the manual procedure at the end of this file, recorded in
-`07-delivery/02-launch-checklist.md`.
+Verification has three layers (D15, `08-testing.md`):
+
+1. **Automated, in CI** — axe on every route (tags `wcag2a`, `wcag2aa`,
+   `wcag21a`, `wcag21aa`), reflow, target size, landmarks, heading order,
+   reduced motion, token contrast and neutrality checks ("Tests for this
+   step" below). They gate every deploy.
+2. **Interactive, per step** — the Claude in Chrome check of each step.
+3. **Manual, before launch** — screen readers, real devices and a human
+   neutrality review (Part 4), recorded in `07-delivery/02-launch-checklist.md`.
+   Automated tools catch roughly a third to a half of accessibility
+   problems; Part 4 is what catches the rest.
 
 ---
 
@@ -132,7 +140,7 @@ must not be merged.
     sponsor or supporter; public bodies appear only as data sources and in
     the "not an official site" disclaimer.
 
-## Part 4 — Manual verification procedure
+## Part 4 — Manual verification procedure (complements the automated suite)
 
 Run on the production build (`npm run build && npm run preview`) with real
 ETL data, and again on the deployed CloudFront URL before launch. Record
@@ -198,8 +206,57 @@ profile with Câmara data, a profile without it, `/sobre`, and a 404 URL:
 - [ ] Read all UI copy aloud: no adjectives or evaluations (Part 3, rule 3).
 - [ ] Check every colour on the page: none associated with a party.
 
+## Tests for this step
+
+This step adds the **cross-cutting** suites; per-page specs already exist
+from the earlier steps.
+
+Unit (Vitest):
+
+| File | Cases |
+|---|---|
+| `src/styles/contrast.test.ts` | Reads `src/index.css`, extracts the `:root` (and, if shipped, dark) `oklch(L C H)` tokens and checks the documented pairs: `foreground`/`background` ≥ 4.5, `muted-foreground` on `background` and on `muted` ≥ 4.5, `primary-foreground`/`primary` ≥ 4.5, `input`, `ring` and `bar` against `background` and `muted` ≥ 3. For achromatic tokens (`C = 0`) relative luminance is exactly `L³`, so the ratio is `(L₁³ + 0.05) / (L₂³ + 0.05)`; chromatic tokens (only `destructive`) are skipped and checked by hand. |
+| `src/test/copy-guard.test.ts` | Scans every `src/**/*.tsx` (except `components/ui/**` and tests) for banned evaluative words in string literals and JSX text — `destaque`, `melhor`, `pior`, `polêmic`, `ficha limpa`, `atuante`, `recomendad` — and for "Câmara Municipal" / "Vereadores" / "parceir". Fails with file and line. |
+| `src/test/no-inline-html.test.ts` | No source file uses `dangerouslySetInnerHTML`, `eval(`, `new Function(`, or `<style>` in JSX (CSP and XSS hygiene). |
+
+End-to-end (Playwright, both projects; routes come from `e2e/golden.ts`: landing, `/candidatos`, a filtered `/candidatos`, an incumbent profile, a non-incumbent profile, a state re-election profile, `/sobre`, a 404 URL, and the landing + `/candidatos` with `latest.json` → 404):
+
+| File | Cases (for every route above) |
+|---|---|
+| `e2e/a11y.spec.ts` | **axe:** zero violations for `wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa` (the shared fixture's `expectNoAxeViolations()`). **Landmarks:** exactly one `header`, `nav[aria-label="Principal"]`, `main#conteudo`, `footer`. **Headings:** exactly one `h1`; no level skipped going down (h1→h3 without h2 fails). **Skip link:** first Tab focuses "Pular para o conteúdo"; Enter moves focus into `main`. **Focus visible:** for the first 15 Tab stops, the focused element's computed `outline-style` is not `none` (or it has a visible box-shadow ring). **Reflow:** at viewport 320 × 640, `document.documentElement.scrollWidth <= window.innerWidth`. **Target size:** every `button`, `input`, `select` and every link that is not inside running text has a bounding box ≥ 24 × 24 px (WCAG 2.5.8; inline links in paragraphs are exempt by the criterion). **Reduced motion:** with `page.emulateMedia({ reducedMotion: "reduce" })`, computed `transition-duration` and `animation-duration` of a card, a button and the progress bar are ≤ 0.01 ms. **Forced colours:** with `emulateMedia({ forcedColors: "active" })`, inputs keep a visible border and the focus outline is present. **Zoom:** `page.evaluate(() => document.body.style.zoom = "2")` on desktop → no element overlaps the header (bounding boxes) — complementary to the manual 200 % check. |
+| `e2e/neutrality.spec.ts` | **Same template:** the ordered list of `h2` texts is identical for every golden profile of the same office (and differs between offices only by the ALESC section). **Same card:** on `/candidatos`, every card root and every result badge has the same `className` and computed colours, whatever the result. **Nobody on the front page:** no golden ballot name, number or party acronym appears in the landing text. **No partner:** "Câmara Municipal", "Vereadores", "parceir" absent from every route's text. **Banned words:** none of the copy-guard list in any route's rendered text (catches strings that come from data too). **Sort disclosure:** the "A ordem não representa recomendação nem avaliação" sentence is present on `/candidatos` for every `ordem`. |
+
+## Browser check (Claude in Chrome)
+
+Procedure: `08-testing.md`. Serve with `npm run build && npm run preview`
+(local snapshot). This is the widest check of the project: run it on every
+route listed above.
+
+- **Keyboard:** the full Part 4.1 pass on every route, driven with
+  `computer` key presses (Tab, Shift+Tab, Enter, Space, arrows); take a
+  screenshot at each focus stop that looks doubtful.
+- **Widths:** `resize_window` to 320 × 640, 360 × 800, 768 × 1024 and
+  1440 × 900 on every route; at each width confirm no horizontal scroll with
+  `javascript_tool` (`document.documentElement.scrollWidth <= innerWidth`) and
+  no overlap.
+- **Zoom:** with `javascript_tool`, set `document.body.style.zoom = "2"` on
+  desktop width and look for clipped or overlapping text; reset afterwards.
+- **Neutrality read-through:** open three profiles of the same office (one
+  elected, one substitute, one not elected) side by side in turn and compare
+  section lists, badge styles and visual weight.
+- **Console:** `read_console_messages` with pattern `error|Uncaught|Warning|Content Security` → nothing on any route.
+- **Network:** `read_network_requests` → only same-origin requests on every route.
+- **Not possible in Claude in Chrome** — use Playwright (MCP or script) and
+  say so in the PR: `prefers-reduced-motion` and `forced-colors` emulation,
+  CPU/network throttling.
+- **GIF:** `step-23-a11y.gif` (keyboard pass on `/candidatos` → a profile, then the 320 px resize).
+- **Fallback:** Playwright MCP or a throw-away script for everything, noted in the PR.
+
 ## Done when
 
 - [ ] Every row of Part 1 has been implemented as described.
 - [ ] Parts 4.1–4.6 all pass on the deployed site, with results recorded in the launch checklist.
 - [ ] A reviewer who did not build the page confirms the fourteen neutrality rules.
+- [ ] `make test-frontend` is green with coverage ≥ 85 % on all four metrics, including the contrast, copy-guard and no-inline-html tests.
+- [ ] `make test-e2e` is green on `chromium` and `webkit`, including `a11y.spec.ts` and `neutrality.spec.ts` on every route.
+- [ ] The browser check above is done and its GIF is referenced in the PR description.

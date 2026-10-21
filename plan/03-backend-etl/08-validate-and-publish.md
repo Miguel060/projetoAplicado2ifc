@@ -16,7 +16,8 @@ and by `make publish-data-local` (manual fallback).
 
 ```
 backend/internal/validate/validate.go
-backend/scripts/publish-data.sh        # the one implementation of the publish order
+backend/internal/validate/validate_test.go
+backend/scripts/publish-data.sh        # manual mirror of the publish job
 Makefile                               # add the publish-data-local target
 ```
 
@@ -311,12 +312,55 @@ Then fix the cause; the next successful refresh moves the pointer forward again.
   separate job with `needs: ingest`, which GitHub skips after a failure;
   locally there is no `latest.json` to publish (step 0 of the script).
 
+## Tests for this step
+
+### `internal/validate/validate_test.go`
+
+Each test copies the **golden snapshot** (`backend/testdata/golden/data/`,
+step 09) into `t.TempDir()`, applies one mutation, and runs `Check`. The
+golden snapshot is the known-good input, so every check is proven to accept
+real pipeline output **and** to reject the specific defect.
+
+| Test | Mutation → expected |
+|---|---|
+| `TestGoldenPasses` | none → `nil` |
+| `TestSchemaAndVersion` | `schemaVersion: 2` → error; `version` ≠ directory name → error |
+| `TestCounts` | `counts.federal_deputy` off by one → error; an office with more than `TopN + 15` candidates → error |
+| `TestProfiles` | delete one `candidates/<slug>.json` → error naming the slug; change a profile's `summary.ballotName` → mismatch error; duplicate slug in the index → error |
+| `TestEnums` | `office: "senator"`, `result.code: "won"` → errors; empty `selectionReasons` → error; `votes.municipality: 0` with `bornInMunicipality: false` → error |
+| `TestPhotos` | photo path pointing to a missing file → error; file replaced by PNG bytes → error |
+| `TestSources` | remove `cgu_amendments` → error; `datasetUrl: "http://…"` → error; a block's `source` id not in the index → error |
+| `TestNullArrays` | `assets.items: null` → error naming the path |
+| `TestBlockRules` | `chamber` set and `amendments` null → error; `stateAssembly` on a federal deputy → error |
+| `TestPrivacy` | add a key `"cpf"` anywhere in a profile → error; add a `cpf` column to the SQLite copy → error |
+| `TestDatasetHash` | append one byte to `dataset.sqlite` → error |
+| `TestSizes` | pad a profile to 600 KB → error |
+| `TestAllErrorsReported` | two mutations at once → the joined error mentions both |
+| `TestPreviousEmpty` | `previous = ""` → comparison skipped, `nil` |
+| `TestPreviousMissingFile` | local path that does not exist → skipped with an **INFO** record (captured `slog` handler), `nil` |
+| `TestPrevious404` | `testsrv` URL answering 404 → skipped, `nil` |
+| `TestPrevious500` | `testsrv` answering 500 three times → **error** |
+| `TestPreviousInvalidJSON` | live pointer is not JSON → error |
+| `TestPreviousLiveIndex404` | pointer OK, live `index.json` 404 → error |
+| `TestPreviousDrop` | the golden has 8 candidates: a live snapshot with **17** (built by duplicating summaries with new slugs) → error `dropped … (> 50%)`; live with exactly **16** → passes (boundary: fails only when `2 × new < live`) |
+| `TestPreviousOfficeGone` | live has state deputies, new has none → error `office state_deputy disappeared` |
+| `TestPreviousSourceGone` | live has a source id the new one lacks → error |
+| `TestPreviousLocalAndURL` | the same live snapshot given as a local path and as a `testsrv` URL → same result |
+
+### `backend/scripts/publish-data.sh`
+
+Shell is not unit-tested; it is linted. CI runs
+`shellcheck backend/scripts/publish-data.sh` in the `backend` job, and the
+same commands are exercised for real by every `refresh-data.yml` run.
+
 ## Done when
 
 ```bash
 # Local dry run of validation (no AWS):
 cd backend && go run ./cmd/ingest -out dist/data -cache .cache -offline && cat dist/data/latest.json
 # Break something on purpose (e.g. set TopN=0 in a scratch branch) → exit code 1, no latest.json.
+cd .. && make test-backend      # all tests pass, total coverage >= 85%
+shellcheck backend/scripts/publish-data.sh
 
 # After a real publish:
 curl -s https://<distribution>.cloudfront.net/data/latest.json | jq .

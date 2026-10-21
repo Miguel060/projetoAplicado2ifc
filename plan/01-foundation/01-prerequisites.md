@@ -17,6 +17,14 @@ Do this once per machine, before any code.
 Windows/Linux: same versions; use the official installers or the distro
 package manager. Nothing in the project is macOS-specific.
 
+### For the tests
+
+| Tool | How |
+|---|---|
+| Playwright browsers (Chromium + WebKit) | `cd frontend && npx playwright install --with-deps chromium webkit` (after step 3) |
+| Claude in Chrome (interactive check of every frontend step) | Chrome with the Claude extension connected to Claude Code; allow `localhost` in the extension's site permissions |
+| Playwright MCP (fallback when Claude in Chrome is unavailable) | `@playwright/mcp`, run `--isolated` so it never touches a real browser profile |
+
 ## 2. GitHub access
 
 - Repository: **`Miguel060/projetoAplicado2ifc`** (public).

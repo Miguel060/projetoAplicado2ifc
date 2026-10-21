@@ -554,6 +554,80 @@ No SourceNote (no data from ALESC is shown).
 
 ---
 
+## Tests for this step
+
+The page is built in two steps (TSE blocks first, then Câmara / amendments /
+ALESC); each step adds the tests of the blocks it builds. Component tests use
+the synthetic builders in `src/test/fixtures.ts` (`makeProfile({ chamber:
+null })`, `makeProfile({ amendments: makeAmendments(...) })`, …).
+
+### Part 1 — layout and TSE blocks
+
+| File | Cases |
+|---|---|
+| `src/components/SourceNote.test.tsx` | publisher, dataset name, both dates (via `formatTimestamp`), "Ver fonte oficial (abre em nova aba)" link to `datasetUrl`; `generatedAt: null` → "data não informada pela fonte"; unknown source id → "Fonte não informada."; several ids → one paragraph each. |
+| `src/components/ExternalLink.test.tsx` + `src/lib/safe-url.test.ts` | `target="_blank"`, `rel="noopener noreferrer"`, visible "(abre em nova aba)"; `javascript:alert(1)`, `data:text/html,…` and garbage → rendered as plain text, no `<a>`; `http:` and `https:` kept. |
+| `src/components/ValueBar.test.tsx` | width = value/max (clamped 0–100 %); `max = 0` → 0 %; `aria-hidden="true"`. |
+| `src/pages/CandidatePage.test.tsx` | `renderRoute("/candidatos/<slug>")`: `<title>` text; `h1` = ballot name; the "Nesta página" nav lists sections 2–9 (+10 for state deputies) in the documented order; **sections in the same order for two different candidates of the same office**; back link → `/candidatos?<from>` when `state.from` starts with `?`, `/candidatos` when state is absent or malformed (`"https://evil"`). |
+| `src/components/profile/ProfileHeader.test.tsx` | photo `alt` "Foto de … divulgada pelo TSE"; null photo → placeholder + "Foto não divulgada pelo TSE"; result label + verbatim TSE label; federation row only when present; DivulgaCandContas link only when non-null. |
+| `src/components/profile/VotesSection.test.tsx` | the three sentences with formatted votes, share, ordinal rank and `candidatesInOffice`. |
+| `src/components/profile/IdentitySection.test.tsx` | rows in order; null social name → row omitted; other nulls → "Não informado na fonte"; `candidacyStatus` verbatim ("DEFERIDO"); no CPF/e-mail labels exist. |
+| `src/components/profile/AssetsSection.test.tsx` | `declared: false` → the "não possui bens a declarar" sentence; declared with no items → "Não há bens listados…"; items → caption, rows, `tfoot` total, total sentence with singular/plural. |
+| `src/components/profile/FinanceSection.test.tsx` | both tables with captions and totals; each empty case independently; the fixed note; link goes to `tseCandidatePage` or falls back to the `tse_finance` dataset URL. |
+| `src/components/profile/SocialSection.test.tsx` | host label + full URL; empty state; unsafe URL not rendered as a link. |
+
+### Part 2 — Câmara, amendments, ALESC
+
+| File | Cases |
+|---|---|
+| `src/components/profile/ProposalsSection.test.tsx` | `chamber: null` → the D2 sentence and a "Por que isso?" link to `/sobre#o-que-e-mostrado`, no SourceNote; bills present → intro sentence, counts spelled out per type, items in order with ementa verbatim; `total > items.length` → "Mostrando os N mais recentes de T" + profile link; `total === 0` → the empty sentence. |
+| `src/components/profile/ChamberSection.test.tsx` | `chamber: null` → empty sentence; status fallback "não informada na fonte"; votes table and recent votes; fixed notes present; CEAP by year (asc) and by category; each empty case. |
+| `src/components/profile/AmendmentsSection.test.tsx` | `amendments: null` → the "apresentadas por deputados(as) federais…" sentence, no SourceNote; empty items → "Não foram encontradas…" + SourceNote; **headline:** the largest text in the section is "Recebido por beneficiários em Videira" with `formatBRL(totals.receivedInMunicipality)`; every committed/liquidated/paid value's visible label includes "valor total da emenda (todas as localidades)" (query all elements containing "empenhado" and assert each is inside such a label); per-amendment beneficiary table sums to its `receivedInMunicipality`; "Pessoas físicas (valores agregados)" rendered as given; `url: null` → no per-item link; `url` set → `ExternalLink`; no `ValueBar` in the section. |
+| `src/components/profile/StateAssemblySection.test.tsx` | non-null → the 2022 sentence + ALESC link; null → the neutral sentence; SourceNote `tse_candidates`; the page renders the section only for `state_deputy`. |
+
+### End-to-end (Playwright, golden snapshot, both projects)
+
+`e2e/golden.ts` reads the golden `index.json` and profiles from
+`../backend/testdata/golden/data` with `fs`, so specs pick candidates **by
+property** instead of hard-coding slugs: `findCandidate(c => c.hasChamberRecord)`,
+`findCandidate(c => !c.hasChamberRecord && c.office === "federal_deputy")`,
+`findCandidate(c => c.office === "state_deputy" && c.runningForReelection)`,
+`findCandidate(c => c.photo === null)`. The golden snapshot must therefore
+contain at least one candidate of each kind (backend fixture requirement).
+
+| File | Scenario |
+|---|---|
+| `e2e/profile.spec.ts` | For an incumbent and a non-incumbent federal candidate: the same ordered list of `h2`s; every section with data ends with a source note with a working link (`request.get(datasetUrl)` is **not** called — external sites are never hit by tests; only the `href` format is checked). **Empty states:** the non-incumbent shows the D2 proposals sentence and the Câmara/amendments sentences. **Amendments headline:** for a candidate with amendments, "Recebido por beneficiários em Videira" is visible above the per-amendment list and every "empenhado/liquidado/pago" text sits under a "valor total da emenda (todas as localidades)" label. **ALESC:** shown for the state re-election candidate, absent for federal ones. **Placeholder:** the candidate without a photo shows the placeholder text. **Wide tables:** on `webkit` (iPhone 13) each table region is focusable and scrolls horizontally while the page does not (`scrollWidth <= innerWidth`). **Back link:** from `/candidatos?q=…&ordem=nome`, open a profile, "Voltar para a lista de candidatos" → the same URL. **External links:** all have `target=_blank` and `rel` containing `noopener` and `noreferrer`. **Privacy:** page text contains no `@` and no 11-digit sequence. Zero axe violations, zero console errors. |
+
+## Browser check (Claude in Chrome)
+
+Procedure: `08-testing.md`. Serve with `npm run build && npm run preview`
+using a local `make ingest` snapshot (golden snapshot as fallback). Run it at
+the end of **each** of the two steps for the sections that step built.
+
+- **Part 1 (TSE blocks) — exercise:** open three profiles (one with photo, one
+  without, one with no declared assets if available); the "Nesta página"
+  links (each jumps to its section, heading not hidden); every "Ver fonte
+  oficial" link (opens a new tab — close it); the DivulgaCandContas link; the
+  social links; "Voltar para a lista de candidatos" after arriving from a
+  filtered list and after arriving from a pasted URL.
+- **Part 2 (Câmara, amendments, ALESC) — exercise:** an incumbent with bills,
+  votes, CEAP and amendments; a non-incumbent federal candidate (all three
+  empty sentences); a state candidate elected in 2022 (ALESC link) and one
+  not elected in 2022; "Mostrando os N mais recentes" link; "Por que isso?";
+  read the amendments section top to bottom and confirm the headline is the
+  Videira figure and every whole-amendment value is labelled as such.
+- **Keyboard:** Tab through the whole page; every table region receives focus
+  and scrolls with the arrow keys at 360 px; focus ring visible on every link.
+- **Widths:** 360 × 800 (photo above the name, tables scroll inside their
+  region, no page-level horizontal scroll) and 1440 × 900.
+- **Console:** `read_console_messages` with pattern `error|Uncaught|Warning|Content Security` → nothing.
+- **Network:** `read_network_requests` → only `candidates/<slug>.json` and
+  the photo per profile; nothing to third-party origins until a link is
+  clicked.
+- **GIFs:** `step-20-profile-tse.gif` and `step-21-profile-activity.gif`.
+- **Fallback:** Playwright MCP or a throw-away script, noted in the PR.
+
 ## Done when
 
 - [ ] Two profiles of the same office (one incumbent, one not) have identical section lists, headings and order; the non-incumbent shows the neutral sentences in sections 6–8.
@@ -568,3 +642,6 @@ No SourceNote (no data from ALESC is shown).
 - [ ] Natural-person beneficiaries appear only as "Pessoas físicas (valores agregados)"; the beneficiary totals of each amendment add up to its "Recebido por beneficiários em Videira".
 - [ ] A state-deputy candidate elected in 2022 shows the ALESC link; one not elected in 2022 shows the neutral sentence instead.
 - [ ] No CPF, e-mail, campaign donor or supplier name, or name of an individual amendment beneficiary appears anywhere (search the page text for "@" and for 11-digit numbers).
+- [ ] `make test-frontend` is green with coverage ≥ 85 % on all four metrics.
+- [ ] `make test-e2e` is green on `chromium` and `webkit`.
+- [ ] The browser check above is done for the part built in this step, and its GIF is referenced in the PR description.

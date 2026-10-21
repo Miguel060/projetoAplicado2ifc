@@ -37,8 +37,9 @@ Only user-visible UI text is in Portuguese (pt-BR).
 | Logging | stdlib `log/slog` (text locally, JSON in CI) | Structured, zero deps. |
 | Lint/format | `gofmt`, `go vet` (CI); `staticcheck` optional | Standard. |
 
-Allowed third-party modules: `modernc.org/sqlite`, `golang.org/x/text`. Anything
-else needs a reason written in this file.
+Allowed third-party modules: `modernc.org/sqlite`, `golang.org/x/text`, and the
+test-only `github.com/google/go-cmp`. Anything else needs a reason written in
+this file.
 
 ## Frontend
 
@@ -58,6 +59,20 @@ else needs a reason written in this file.
 | Charts | **none** — HTML tables with CSS bars | — | Tables are accessible to screen readers by nature; a chart lib would be the heaviest dependency for the least value. |
 | Lint + format | **Biome** | 2.5.12 | One tool instead of ESLint + Prettier. |
 | Type check | `tsc --noEmit` | 7.0.2 | Vite does not type-check during build. |
+
+## Testing
+
+| Layer | Tool | Version | Use |
+|---|---|---|---|
+| Backend | Go `testing` (stdlib), `net/http/httptest` | Go 1.25 | unit tests, in-process fake upstream, whole-pipeline integration test |
+| Backend | `github.com/google/go-cmp` (test-only) | latest v0.x | readable diffs |
+| Frontend | Vitest + `@vitest/coverage-v8` | 5.0.5 | unit/component runner, coverage thresholds (85 %) |
+| Frontend | `@testing-library/react` / `dom` / `user-event` / `jest-dom` | 16.3.3 / 10.4.2 / 14.6.8 / 7.0.1 | component tests the way a user interacts |
+| Frontend | `jsdom` | 30.1.3 | DOM for Vitest |
+| Frontend | `@playwright/test` | 1.64.1 | end-to-end on the production build; Chromium + WebKit (iPhone 13) |
+| Frontend | `@axe-core/playwright` | 4.14.0 | automated WCAG 2.1 A/AA checks in every e2e spec |
+| Frontend (per step) | Claude in Chrome (Playwright MCP as fallback) | — | interactive verification before each frontend PR |
+| Infrastructure | Vitest + `aws-cdk-lib/assertions` | 5.0.5 | security-invariant tests on the synthesized template |
 
 ## Infrastructure
 
@@ -84,7 +99,6 @@ else needs a reason written in this file.
 | gov.br Design System (DSGov) | Using the federal government's visual identity would make a student project look like an official federal service — misleading. |
 | Google Fonts / any CDN | Third-party requests leak visitor IPs; everything is self-hosted. |
 | Docker | Nothing to containerise: a Go binary and static files. |
-| Automated test suites | Out of scope by instruction (production code only). |
 
 ## Version policy
 

@@ -61,6 +61,9 @@ backend/internal/amendments/sources.go
 backend/internal/amendments/load.go        # Load
 backend/internal/amendments/match.go       # author → deputy
 backend/config/name-overrides.json         # (created in step 01)
+# tests (next to the code):
+backend/internal/amendments/load_test.go
+backend/internal/amendments/match_test.go
 ```
 
 ## Types
@@ -85,14 +88,14 @@ type Override struct {
 	Note       string `json:"note"`
 }
 
-func Load(ctx context.Context, c *fetch.Client, s *fetch.Sources,
-	deps camara.Deputies, overridesPath string) (map[int][]Amendment, error)
+func Load(ctx context.Context, env *fetch.Env,
+	deps camara.Deputies, overridesPath string) (byDeputy map[int][]Amendment, warnings []string, err error)
 ```
 
 ## Algorithm
 
-1. **Open the zip** `config.CGUAmendmentsZip` (32.5 MB; range-read); on 404
-   retry with `config.CGUAmendmentsAlt` (302 → same file). Encoding
+1. **Open the zip** `env.URLs.CGUAmendmentsZip` (32.5 MB; range-read); on 404
+   retry with `env.URLs.CGUAmendmentsAlt` (302 → same file). Encoding
    `csvx.Windows1252`.
 2. **Per-beneficiary pass** — member `EmendasParlamentares_PorFavorecido.csv`
    (24 MB compressed): keep rows where
@@ -127,7 +130,7 @@ func Load(ctx context.Context, c *fetch.Client, s *fetch.Sources,
    (pattern unverified as of 2026-10-21 — see `02-data-sources/03-portal-transparencia.md`).
 7. Round every sum to 2 decimals; return `map[deputyID][]Amendment` sorted by
    `Year` desc, then `ReceivedInMunicipality` desc, then `Code`.
-8. Record `cgu_amendments`: `FileURL = CGUAmendmentsZip`,
+8. Record `cgu_amendments`: `FileURL = env.URLs.CGUAmendmentsZip`,
    `DatasetURL = https://portaldatransparencia.gov.br/download-de-dados/emendas-parlamentares`,
    `GeneratedAt` = modified time of the `PorFavorecido` member.
 
@@ -156,6 +159,30 @@ cases (`FULANO DE TAL` ↔ `Fulano de Tal`). Common misses and their fix:
 - Do not attach relator/caucus amendments to the caucus coordinator or any
   candidate — that would be an editorial attribution.
 
+## Tests for this step
+
+Against the fake upstream (`testsrv`, step 09) serving the synthetic
+`EmendasParlamentares.zip` (all three members, Windows-1252) and
+`backend/testdata/config/name-overrides.json` (one override: author code
+`9911` → deputy `990001`). Deputies are built in the test (990001, 990002).
+Fixture keys (F1…F7, S1…S5, deputies 990001–990003, amendment codes) refer to the synthetic cast defined once in `09-integration-tests.md` §2.
+
+| File | Test | Cases |
+|---|---|---|
+| `load_test.go` | `TestOnlyMunicipality` | rows of `OUTRA CIDADE TESTE` and of a homonym `VIDEIRA` with `UF Favorecido = PR` are excluded |
+| | `TestReceivedAndBeneficiaries` | `202599010001` (legal entities only) → `ReceivedInMunicipality = 175000` (`MUNICIPIO DE VIDEIRA` in two months 100000 + 50000, `FUNDO MUNICIPAL TESTE` 25000), beneficiaries summed per name |
+| | `TestNaturalPersonsAggregated` | `202599010002` (two natural persons, 1000 + 500) → a single beneficiary `Pessoas físicas (valores agregados)` = 1500; the strings `PESSOA FISICA TESTE UM`/`DOIS` and the fake documents `99999999999`/`88888888888` appear nowhere in the result (reflect walk) |
+| | `TestIndividualOnly` | the relator amendment `202599990001` (R$ 500,000 to Videira) is attributed to nobody; logged as a count |
+| | `TestEnrichment` | `202599010001` gets year 2025, function `Saúde`, subfunction `Atenção básica – teste` (Windows-1252 `0x96` → `–`), committed/liquidated/paid from `EmendasParlamentares.csv`; `202599010002` absent there → year `2025` derived from the code, values 0, one warning |
+| | `TestAltURLOn404` | `srv.Remove("/cgu/EmendasParlamentares.zip")` → loader follows `CGUAmendmentsAlt` (302) and returns the same result; `FileURL` still the direct URL |
+| | `TestURLPattern` | empty `PortalAmendmentURLPattern` → `URL == nil`; pattern `"https://x.invalid/e/%s"` (passed through the unexported helper) → formatted |
+| | `TestOrderingAndRounding` | year desc, then received desc, then code; sums rounded to 2 decimals |
+| `match_test.go` | `TestMatchByName` | `CANDIDATA TESTE UM` (upper, no accents) ↔ deputy name `Candidata Teste Um` |
+| | `TestOverride` | author code `9911` (`APELIDO TESTE`) → 990001 via the overrides file |
+| | `TestAmbiguousName` | two deputies normalising to the same name → key removed, warning logged, author unmatched unless overridden |
+| | `TestUnmatchedWarning` | returned warnings contain `9920 SENADORA TESTE (1 rows)`; `S/I` / `Sem informação` authors produce no warning |
+| | `TestOverridesFile` | path `""` → no overrides; missing file → error; malformed JSON → error; `deputyId: 0` → error |
+
 ## Done when
 
 ```bash
@@ -165,4 +192,5 @@ sqlite3 "$DS" "SELECT d.parliamentary_name, COUNT(*), ROUND(SUM(a.received_in_mu
                GROUP BY d.deputy_id ORDER BY 3 DESC;"
 sqlite3 "$DS" "SELECT COUNT(*) FROM amendment_beneficiary WHERE name LIKE '%CPF%';"   # 0
 (cd backend && go run ./cmd/ingest -out dist/data -cache .cache -offline 2>&1 | grep unmatched_individual_authors)   # review; add overrides if needed
+make test-backend               # all tests pass, total coverage >= 85%
 ```

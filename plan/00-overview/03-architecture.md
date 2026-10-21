@@ -5,13 +5,13 @@
 ```
                  ┌──────────────────────────── GitHub (Miguel060/projetoAplicado2ifc) ─────────────────────────┐
                  │                                                                                              │
-                 │  PR / push ──► ci.yml (vet, build, typecheck, lint, cdk synth)                               │
+                 │  PR / push ──► ci.yml (vet, lint, typecheck, unit+integration+e2e tests, 85% cov, synth)    │
                  │                                                                                              │
                  │  push to main                                                                                │
                  │        ├──► deploy.yml: verify (= ci.yml) ──► npm run build ──► s3 sync (site files)         │
                  │        │                                                                                     │
                  │  cron weekly / manual / backend change                                                       │
-                 │        └──► refresh-data.yml ──► go run ./cmd/ingest ──► s3 sync (data/<version>/)           │
+                 │        └──► refresh-data.yml ──► go test ──► go run ./cmd/ingest ──► s3 sync (data/<version>/)│
                  │                                     │                     + data/latest.json (last)         │
                  └─────────────────────────────────────┼──────────────────────────────┬───────────────────────┘
                                                        │ HTTPS downloads               │ OIDC → IAM role
@@ -44,12 +44,14 @@
 | 4 | **Pointer** — `data/latest.json` | JSON | S3 | Names the current `<version>`. Uploaded last; switching it is the atomic "go live". |
 | 5 | **Web app** — `frontend/` | TypeScript, React | Visitor's browser | Search, filters, profiles, About page. Read-only. |
 | 6 | **Infrastructure** — `infra/` | TypeScript, AWS CDK | Deployed manually by the AWS account owner (`make infra-deploy`) | S3, CloudFront, CloudFront Function, response-headers policy, GitHub OIDC deploy role. |
-| 7 | **CI/CD** — `.github/workflows/` | YAML | GitHub Actions | Checks every change; deploys the site; refreshes the data. |
+| 7 | **CI/CD** — `.github/workflows/` | YAML | GitHub Actions | Tests and checks every change; deploys the site only when all tests pass; refreshes the data after the Go tests pass. Why Actions and not Lambda: D16. |
+| 8 | **Tests** — `backend/**/*_test.go`, `frontend/src/**/*.test.tsx`, `frontend/e2e/`, `infra/test/` | Go, TypeScript | CI and locally | Unit, whole-pipeline integration (golden snapshot), end-to-end (Chromium + WebKit, axe), CDK assertions. See `01-foundation/05-testing-strategy.md`. |
 
 ## Data flow, step by step
 
 1. **Trigger.** `refresh-data.yml` starts (weekly cron, manual button, or a
-   push that touches `backend/`).
+   push that touches `backend/`). The Go tests run first; a failure stops
+   the run before any download.
 2. **Download.** The Go program fetches each source. For the two very large
    TSE zips it reads **only the `_SC.csv` member** through HTTP range requests
    instead of downloading the whole national file (454 MB → a few tens of MB).

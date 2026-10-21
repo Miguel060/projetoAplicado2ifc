@@ -4,9 +4,13 @@
 announcement. **Who:** everyone; each section has a suggested role, and the
 **neutrality review must be done by people who did not write the page**.
 
-There are no automated test suites in this project (production code only).
-This checklist is the quality gate: compilers, linters and the ETL's
-validation catch the mechanical errors; this catches the rest.
+Automated tests gate every deploy (decision D15,
+`01-foundation/05-testing-strategy.md`): backend and frontend unit and
+integration tests with **≥ 85 %** coverage, Playwright end-to-end in Chromium
+and WebKit with axe checks, and CDK assertion tests. The manual checks below
+**complement them — they never replace them**: real phones, real screen
+readers, real official sites and human judgement on neutrality are things no
+automated suite covers. §0 confirms the automated gates; §1–§7 are manual.
 
 Set these once in the terminal used for the checks:
 
@@ -22,6 +26,26 @@ explicitly — always pass `--profile <your-profile>` (the project uses a
 profile named `personal`).
 
 ---
+
+## 0. Tests — [AWS account owner]
+
+On the **release commit** (the `main` commit being handed over):
+
+- [ ] All CI jobs green on that commit's `Deploy` run (`verify`): `Backend (Go)`,
+      `Frontend (React)`, `End-to-end (Playwright)`, `Infrastructure (CDK)`.
+- [ ] Backend coverage **≥ 85 %** of `./internal/...` (shown in the `Backend (Go)` job summary).
+- [ ] Frontend coverage **≥ 85 %** lines, statements, functions and branches of `src/` (Vitest output in `Frontend (React)`).
+- [ ] End-to-end green in **both** projects, `chromium` (Desktop Chrome) and `webkit` (iPhone 13), with zero axe violations and no console errors.
+- [ ] Infrastructure assertion tests green (bucket, OAC, CSP, OIDC trust, exact permissions, imported provider, pinned account, SPA rewrite).
+- [ ] The latest `Refresh data` run is green, including its `go test` step before the ETL.
+- [ ] The golden snapshot (`backend/testdata/golden/data`) is current: the backend pipeline test passed without `-update` on this commit.
+- [ ] Every frontend PR merged for the MVP mentions its Claude in Chrome check (or the Playwright alternative).
+
+Locally, the same in one command (with the browsers installed):
+
+```bash
+make check
+```
 
 ## 1. Functional — [frontend lead + one other member]
 
@@ -213,6 +237,7 @@ aws iam get-account-summary --profile personal \
 
 | Section | Checked by (role) | Date | Notes / issues opened |
 |---|---|---|---|
+| 0. Tests (automated gates) | | | |
 | 1. Functional | | | |
 | 2. Data spot-checks | | | |
 | 3. Responsive | | | |
@@ -222,7 +247,10 @@ aws iam get-account-summary --profile personal \
 | 7. Operations and cost | | | |
 
 The MVP is handed to the APL partner only when every **blocker** in this
-table is resolved. Non-blocking findings become GitHub issues.
+table is resolved. Non-blocking findings become GitHub issues. Every
+manual finding that gets fixed also gets an automated regression test in the
+fix's PR (a Playwright spec for UI issues, a Go test for data issues), so the
+same bug cannot come back unnoticed.
 
 ---
 

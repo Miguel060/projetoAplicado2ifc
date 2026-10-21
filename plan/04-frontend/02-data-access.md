@@ -192,6 +192,11 @@ export function getIndexOrNull(): Promise<DataIndex | null> {
   return getIndex().catch(() => null);
 }
 
+/** Test-only: forget the memoised index. Called from src/test/setup.ts after each test. */
+export function resetDataClientForTests(): void {
+  indexPromise = null;
+}
+
 export async function getProfile(version: string, slug: string): Promise<CandidateProfile> {
   const profile = await getJson<CandidateProfile>(
     dataUrl(version, `candidates/${encodeURIComponent(slug)}.json`),
@@ -277,7 +282,7 @@ export async function candidateLoader({ params }: LoaderFunctionArgs): Promise<C
 `src/router.tsx`:
 
 ```tsx
-import { createBrowserRouter } from "react-router";
+import { createBrowserRouter, type RouteObject } from "react-router";
 import { SiteLayout } from "@/components/SiteLayout";
 import { candidateLoader, indexLoader, landingLoader } from "@/data/loaders";
 import { AboutPage } from "@/pages/AboutPage";
@@ -293,7 +298,7 @@ import { SearchPage } from "@/pages/SearchPage";
  * Path-based routes (shareable URLs). CloudFront rewrites extension-less
  * paths to /index.html (05-infrastructure), so deep links work.
  */
-export const router = createBrowserRouter([
+export const routes: RouteObject[] = [
   {
     id: "root",
     path: "/",
@@ -328,8 +333,13 @@ export const router = createBrowserRouter([
       { path: "*", Component: NotFoundPage },
     ],
   },
-]);
+];
+
+export const router = createBrowserRouter(routes);
 ```
+
+`routes` is exported separately so component tests render the **real** route
+table with `createMemoryRouter(routes, …)` (`08-testing.md`).
 
 The pathless `data` route has no `Component`; React Router renders an
 `<Outlet />` for it by default.
@@ -618,6 +628,60 @@ const datasetHref = dataUrl(index.version, index.dataset.path);
 
 Never hard-code `/data/latest/...` — there is no such path.
 
+## Tests for this step
+
+Shared helpers used here are defined in `08-testing.md`: `mockFetch(routes)`
+(stubs `fetch` with a URL → response table), the synthetic builders
+`makeIndex()` / `makeSummary()` / `makeProfile()` in `src/test/fixtures.ts`,
+and `renderRoute(path)` (renders the real route table with
+`createMemoryRouter`).
+
+Unit tests (Vitest):
+
+| File | Cases |
+|---|---|
+| `src/data/client.test.ts` | `dataUrl("v1", "photos/1.jpg")` → `/data/v1/photos/1.jpg`. `fetchLatest` sends `cache: "no-cache"`; returns the pointer on 200 JSON; `latest.json` **404 → `unavailable`**, **403 → `unavailable`**; `schemaVersion: 2` → `unavailable`; `fetch` rejection → `network`; HTTP 500 → `network`; 200 with `text/html` (SPA fallback misconfigured) → `network`; invalid JSON body → `network`. `getIndex` is memoised (two calls → one `latest.json` + one `index.json` request); after a failure the memo resets and the next call refetches; `index.json` 404 → `unavailable`; index without `candidates` array → `unavailable`. `getIndexOrNull` resolves `null` on every failure kind and never rejects. `getProfile` builds the URL with `encodeURIComponent(slug)`; 404 → `not_found`; `profile.version` ≠ index version → `unavailable`. |
+| `src/data/errors.test.ts` | `isDataError` true for `DataError`, false for `Error`, strings, `null`. |
+| `src/data/loaders.test.ts` | `landingLoader()` returns **synchronously** an object whose `index` is a promise (assert it is not awaited: the function returns before `fetch` resolves, using a never-resolving fetch mock); with `latest.json` 404 the promise resolves `null`. `indexLoader` rejects with `unavailable` when there is no snapshot. `candidateLoader` with an unknown slug throws `not_found` **without** requesting a profile (assert the fetch mock saw no `/candidates/` URL); with a known slug returns `{ index, profile }`. |
+| `src/data/format.test.ts` | `formatInteger(3120)` → `3.120`; `formatBRL(1234.5)` → `R$ 1.234,50` (compare after replacing `\u00a0` with a space — Intl uses a no-break space); `formatShare(0.1043)` → `10,4%`; `formatOrdinal(1)` → `1º`; `formatDate("2026-10-04")` → `04/10/2026` and `formatDate("2026-10-04","long")` → `4 de outubro de 2026`; malformed date returned as-is; `formatTimestamp("2026-11-09T06:02:41Z")` contains `09/11/2026` and `03:02` and ends with `(horário de Brasília)` (do not hard-code the separator ICU puts between date and time); invalid timestamp returned as-is; `formatDayOf("2026-11-09T02:00:00Z")` → `08/11/2026`; `formatBytes(512_000)` → `500 KB`, `formatBytes(5_242_880)` → `5 MB`; `formatVotes(1)` → `1 voto`, `formatVotes(2)` → `2 votos`. |
+| `src/data/labels.test.ts` | every `ResultCode` except `other` has a label; `resultLabel({code:"other", tseLabel:"X"})` → `X`; the four `RESULT_GROUPS` together cover every `ResultCode` exactly once. |
+| `src/lib/text.test.ts` | reads the shared vectors `testdata/textnorm-vectors.json` (repository root) and asserts `normalize(input) === expected` for every entry — the Go suite reads the same file. `matchesQuery`: every token must match; empty query matches everything; accents and case ignored. |
+
+Component tests (Testing Library):
+
+| File | Cases |
+|---|---|
+| `src/pages/ErrorPage.test.tsx` | Rendered through `renderRoute` with fetch mocks: `latest.json` 404 on `/candidatos` → heading "Os dados estão em preparação"; fetch rejection → "Não foi possível carregar os dados"; both show "Tentar novamente" and a "Página inicial" link to `/`; an unknown slug → the not-found page. The error page renders inside the layout (header present, exactly one `main`). |
+| `src/pages/LoadingPage.test.tsx` | while the index promise is pending, `/candidatos` shows the layout and a `role="status"` with "Carregando dados dos candidatos…". |
+| `src/data/hooks.test.tsx` | `useDataIndex` throws outside the data routes; `useOptionalDataIndex` returns `undefined` on `/` and the index on `/candidatos`. |
+
+End-to-end (Playwright, both projects, shared fixture):
+
+| File | Scenario |
+|---|---|
+| `e2e/data-states.spec.ts` | **Golden snapshot:** `/candidatos` renders (placeholder page at this step), Network shows exactly one `latest.json` and one `index.json` after navigating `/` → `/candidatos` → `/sobre`. **No data:** `page.route("**/data/latest.json", r => r.fulfill({ status: 404 }))` → `/candidatos` and `/sobre` show "Os dados estão em preparação" inside the normal header/footer. **Schema mismatch:** fulfil `latest.json` with `{"schemaVersion":2,…}` → same message. **Network failure:** `route.abort()` → "Não foi possível carregar os dados"; after removing the route, "Tentar novamente" loads the page. **Unknown profile:** `/candidatos/nao-existe` → not-found page and no request matching `/candidates/`. Every scenario: zero axe violations and zero console errors (the console guard allows the expected failed-resource messages only in the failure scenarios — see `08-testing.md`). |
+
+## Browser check (Claude in Chrome)
+
+Procedure: `08-testing.md`. Serve with `npm run build && npm run preview`
+(local snapshot from `make ingest` if available, otherwise the golden
+snapshot: `E2E_DATA_DIR=../backend/testdata/golden/data npm run preview`).
+This step has no final pages yet; exercise the data layer through the
+placeholder pages and the error screens:
+
+- **Flows:** `/` → `/candidatos` → `/sobre` → back; `/candidatos/nao-existe`;
+  with `read_network_requests`, confirm one `latest.json` and one
+  `index.json` for the whole sequence, and no `/candidates/` request for the
+  unknown slug.
+- **Error screens:** stop the preview, serve with an empty data dir
+  (`E2E_DATA_DIR=/tmp/empty-data npm run preview`) → `/candidatos` shows "Os
+  dados estão em preparação"; click "Tentar novamente" and "Página inicial".
+- **Keyboard:** reach "Tentar novamente" and "Página inicial" with Tab; activate with Enter.
+- **Widths:** 360 × 800 and 1440 × 900.
+- **Console:** `read_console_messages` with pattern `error|Uncaught|Content Security` → only the expected 404 for `latest.json` in the empty-data run; nothing in the normal run.
+- **GIF:** `step-08-data-access.gif`.
+- **Fallback:** Playwright MCP or a throw-away script, noted in the PR.
+
 ## Done when
 
 - [ ] **No data published yet** (empty `backend/dist/data`, or a fresh bucket): `/` renders completely, its strip says "Dados em preparação", and the console shows no uncaught error; `/candidatos`, `/candidatos/<x>` and `/sobre` show "Os dados estão em preparação" inside the normal header and footer.
@@ -629,3 +693,6 @@ Never hard-code `/data/latest/...` — there is no such path.
 - [ ] Temporarily editing the local `latest.json` to `"schemaVersion": 2`: data pages show "Os dados estão em preparação"; the landing still renders, with "Dados em preparação" in the strip.
 - [ ] DevTools → Network → "Offline", then reload a data page: the network error screen appears and "Tentar novamente" works once back online.
 - [ ] Formatting spot checks: `formatBRL(1234.5)` → `R$ 1.234,50`; `formatShare(0.1043)` → `10,4%`; `formatDate("2026-10-04")` → `04/10/2026`; `formatDayOf("2026-11-09T02:00:00Z")` → `08/11/2026` (still the 8th in Brasília).
+- [ ] `make test-frontend` is green with coverage ≥ 85 % on all four metrics; `src/data/**` and `src/lib/text.ts` are at or near 100 %.
+- [ ] `make test-e2e` is green on `chromium` and `webkit`.
+- [ ] The browser check above is done and its GIF is referenced in the PR description.

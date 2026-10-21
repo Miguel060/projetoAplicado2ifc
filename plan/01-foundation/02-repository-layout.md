@@ -15,10 +15,12 @@ projetoAplicado2ifc/
 │   ├── go.sum
 │   ├── cmd/
 │   │   └── ingest/
-│   │       └── main.go               # CLI entry point
+│   │       └── main.go               # thin CLI: flags → pipeline.Options
 │   ├── config/
 │   │   └── name-overrides.json       # amendment author name → Câmara deputy id (only for misses)
 │   ├── internal/
+│   │   ├── pipeline/                 # Run(ctx, Options): the whole ETL, called by main and by the integration test
+│   │   ├── testsrv/                  # in-process fake upstream for tests (imported only by *_test.go)
 │   │   ├── config/                   # constants (year, UF, municipality, topN, offices, URLs)
 │   │   ├── fetch/                    # HTTP client, retries, local cache, remote zip reader
 │   │   ├── csvx/                     # Latin-1 / BOM readers, BR number/date parsing, sentinels
@@ -30,6 +32,12 @@ projetoAplicado2ifc/
 │   │   ├── export/                   # JSON writers, slugs, photo copy
 │   │   ├── validate/                 # pre-publish sanity checks
 │   │   └── textnorm/                 # accent/case normalisation shared by matching and search text
+│   │       (every package has its *_test.go next to the code)
+│   ├── testdata/
+│   │   ├── sources/                  # SYNTHETIC fixtures in the real layouts/encodings (byte-exact)
+│   │   └── golden/data/              # expected pipeline output = the frontend e2e fixture
+│   ├── scripts/
+│   │   └── publish-data.sh           # manual mirror of the publish job
 │   ├── .cache/                       # downloaded files (git-ignored)
 │   └── dist/                         # ETL output (git-ignored)
 │       └── data/
@@ -53,17 +61,26 @@ projetoAplicado2ifc/
 │       ├── pages/                    # LandingPage (/), SearchPage (/candidatos), CandidatePage, AboutPage, NotFoundPage, ErrorPage
 │       ├── components/               # app components (CandidateCard, SourceNote, …)
 │       ├── components/ui/            # shadcn/ui generated components (ours to edit)
-│       └── lib/                      # utils (cn, text normalisation, url params)
+│       ├── lib/                      # utils (cn, text normalisation, url params)
+│       └── **/*.test.ts(x)           # unit/component tests next to the code
+│   ├── e2e/                          # Playwright specs + fixtures.ts (axe, console guard)
+│   ├── vitest.config.ts
+│   └── playwright.config.ts
 ├── infra/                            # AWS CDK (TypeScript)
 │   ├── package.json
 │   ├── package-lock.json
 │   ├── cdk.json
 │   ├── tsconfig.json
 │   ├── bin/app.ts
-│   └── lib/
-│       ├── site-stack.ts
-│       └── spa-rewrite.js            # CloudFront Function source
+│   ├── lib/
+│   │   ├── config.ts                 # account, region, repository ids — imported by app.ts and the tests
+│   │   ├── site-stack.ts
+│   │   └── spa-rewrite.js            # CloudFront Function source
+│   └── test/                         # CDK assertion tests + function rewrite tests
+├── testdata/
+│   └── textnorm-vectors.json         # shared by the Go and TS text-normalisation tests
 ├── .editorconfig
+├── .gitattributes                    # backend/testdata/** -text (fixtures are byte-exact)
 ├── .gitignore
 ├── .nvmrc                            # 24
 ├── biome.json                        # lint/format for frontend + infra
@@ -88,6 +105,13 @@ node_modules/
 /frontend/dist/
 /infra/cdk.out/
 
+# Test output
+/backend/coverage.out
+/frontend/coverage/
+/frontend/playwright-report/
+/frontend/test-results/
+/infra/coverage/
+
 # OS / editors
 .DS_Store
 .vscode/*
@@ -99,13 +123,20 @@ node_modules/
 .env.*
 ```
 
+## `.gitattributes`
+
+```gitattributes
+# Fixtures reproduce the real files byte for byte (Latin-1, CRLF, BOM).
+backend/testdata/** -text
+```
+
 ## `Makefile` (the shared vocabulary)
 
 ```makefile
 AWS := aws --profile personal
 ACCOUNT := 436812234154
 
-.PHONY: ingest dev build-site check preflight publish-data-local infra-diff infra-deploy
+.PHONY: ingest dev build-site test test-backend test-frontend test-e2e test-infra check preflight publish-data-local infra-diff infra-deploy
 
 ingest:            ## Run the ETL locally (uses backend/.cache)
 	cd backend && go run ./cmd/ingest -out dist/data -cache .cache
@@ -116,10 +147,26 @@ dev:               ## Frontend dev server; serves backend/dist/data at /data
 build-site:
 	cd frontend && npm run build
 
+test-backend:      ## Go tests, race detector, 85% coverage gate
+	cd backend && go test -race -covermode=atomic -coverpkg=./internal/... -coverprofile=coverage.out ./... \
+	  && go tool cover -func=coverage.out | awk '/^total:/ { sub("%","",$$3); if ($$3+0 < 85) { print "coverage " $$3 "% < 85%"; exit 1 } else print "coverage " $$3 "%" }'
+
+test-frontend:     ## Vitest with coverage thresholds (85%)
+	cd frontend && npm run test:coverage
+
+test-e2e:          ## Production build + Playwright (Chromium + WebKit) against the golden snapshot
+	cd frontend && npm run test:e2e
+
+test-infra:        ## CDK assertion tests
+	cd infra && npm test
+
+test: test-backend test-frontend test-e2e test-infra
+
 check:             ## What CI runs, locally
 	cd backend && test -z "$$(gofmt -l .)" && go vet ./... && go build ./...
 	cd frontend && npm run typecheck && npm run lint && npm run build
 	cd infra && npm run typecheck && npx cdk synth -q
+	$(MAKE) test
 
 preflight:         ## Refuse to continue unless the personal account is selected
 	@test "$$($(AWS) sts get-caller-identity --query Account --output text)" = "$(ACCOUNT)" \

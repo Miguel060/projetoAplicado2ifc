@@ -155,9 +155,11 @@ adding one, it needs a written reason in `00-overview/02-decisions.md`.
 **Branches → Add rule**), target `main`:
 
 - [x] **Require a pull request before merging**, 1 approval (another member reviews).
-- [x] **Require status checks to pass**:
+- [x] **Require status checks to pass** — all four CI jobs, which include
+  every test suite and the 85 % coverage gates (decision D15):
   - `Backend (Go)`
   - `Frontend (React)`
+  - `End-to-end (Playwright)`
   - `Infrastructure (CDK)`
 
   These names only appear in the picker after `ci.yml` has run once — open a
@@ -187,12 +189,12 @@ The error names no claim. Print the real `sub` from inside the failing job
 |---|---|---|
 | `…:ref:refs/heads/<other-branch>` | Workflow dispatched from a branch | Run it from `main`. |
 | `…:pull_request` | Job ran on a PR | Deploy jobs must not run on PRs (they don't). |
-| `repo:…@<ids>/…` with different ids | Repo transferred/recreated | Update `ownerId` / `repositoryId` in `infra/bin/app.ts`, redeploy the stack. |
+| `repo:…@<ids>/…` with different ids | Repo transferred/recreated | Update `ownerId` / `repositoryId` in `infra/lib/config.ts` **and** the `SUBJECTS` expectation in `infra/test/site-stack.test.ts`, redeploy the stack. |
 | Something with `job_workflow_ref`, `environment`, etc. | The owner customised the OIDC subject template | Reset it (`gh api -X PUT repos/Miguel060/projetoAplicado2ifc/actions/oidc/customization/sub -F use_default=true`) or add the exact new subject to `githubSubjects`. Never use a wildcard. |
 | No token at all | Job lacks `permissions: id-token: write` | Add it to that job only. |
 
 ## Done when
 
 - [ ] The five variables exist (`gh variable list` shows them).
-- [ ] The ruleset protects `main` with the three checks.
+- [ ] The ruleset protects `main` with the four checks.
 - [ ] The first run of `deploy.yml` passes the "Refuse to deploy into the wrong account" step.
